@@ -68,8 +68,15 @@ const NO_INPUT: Input = { thrust: 0, roll: 0, pitch: 0, moveZ: 0, moveX: 0, look
 
 const clamp1 = (v: unknown) => Math.max(-1, Math.min(1, Number(v) || 0));
 
+// hitscan lasers: transient events, deliberately NOT in the schema — they are
+// broadcast once and rendered briefly by clients, never patched as state
+const FIRE_COOLDOWN_MS = 300;
+const LASER_RANGE = 400;      // units
+const HIT_RADIUS = 0.87;      // bounding sphere around each ship
+
 export class LobbyRoom extends Room<LobbyState> {
   private inputs = new Map<string, Input>();
+  private lastFireTime = new Map<string, number>();
 
   onCreate() {
     this.setState(new LobbyState());
@@ -93,6 +100,8 @@ export class LobbyRoom extends Room<LobbyState> {
         lookYaw: clamp1(msg?.lookYaw),
       });
     });
+
+    this.onMessage('fire', (client) => this.fire(client));
 
     this.setSimulationInterval((dtMs) => this.update(dtMs / 1000));
   }
@@ -180,6 +189,56 @@ export class LobbyRoom extends Room<LobbyState> {
     });
   }
 
+  // server-authoritative hitscan: aim comes from the shooter's replicated
+  // orientation, never from client-supplied geometry
+  fire(client: Client) {
+    const now = Date.now();
+    const last = this.lastFireTime.get(client.sessionId);
+    if (last !== undefined && now - last < FIRE_COOLDOWN_MS) return;
+
+    const shooter = this.state.players.get(client.sessionId);
+    if (!shooter) return;
+    this.lastFireTime.set(client.sessionId, now);
+
+    const origin = new Vector3(shooter.x, shooter.y, shooter.z);
+    const dir = LOCAL_FORWARD.clone()
+      .applyQuaternion(new Quaternion(shooter.qx, shooter.qy, shooter.qz, shooter.qw))
+      .normalize();
+
+    // ray-sphere intersection against every other player; nearest hit wins
+    let victim: string | null = null;
+    let hitDist = LASER_RANGE;
+    const r2 = HIT_RADIUS * HIT_RADIUS;
+    this.state.players.forEach((p, sessionId) => {
+      if (sessionId === client.sessionId) return;
+      const toCenter = new Vector3(p.x, p.y, p.z).sub(origin);
+      let t: number;
+      if (toCenter.lengthSq() <= r2) {
+        t = 0; // origin already inside the sphere: point-blank hit
+      } else {
+        const b = toCenter.dot(dir);          // projection onto the ray
+        if (b < 0) return;                    // sphere is behind us
+        const d2 = toCenter.lengthSq() - b * b; // perpendicular distance²
+        if (d2 > r2) return;                  // ray passes wide
+        t = b - Math.sqrt(r2 - d2);           // nearest intersection
+      }
+      if (t < hitDist) { hitDist = t; victim = sessionId; }
+    });
+
+    this.broadcast('laser', {
+      ox: origin.x, oy: origin.y, oz: origin.z,
+      dx: dir.x, dy: dir.y, dz: dir.z,
+      len: victim ? hitDist : LASER_RANGE,
+      shooter: client.sessionId,
+      victim,
+    });
+
+    if (victim) {
+      console.log(`[lobby] ${client.sessionId} shot down ${victim}`);
+      this.clients.find((c) => c.sessionId === victim)?.leave(4000);
+    }
+  }
+
   onJoin(client: Client, options: { name?: string }) {
     const player = new Player();
     player.name = (options.name || 'anonymous').slice(0, 24);
@@ -192,5 +251,6 @@ export class LobbyRoom extends Room<LobbyState> {
     console.log(`[lobby] ${player?.name} left (${client.sessionId})`);
     this.state.players.delete(client.sessionId);
     this.inputs.delete(client.sessionId);
+    this.lastFireTime.delete(client.sessionId);
   }
 }
