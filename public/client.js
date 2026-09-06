@@ -9,6 +9,11 @@ const status = document.getElementById('status');
 // Same host/port that served this page, so it works on localhost and LAN alike.
 const client = new Colyseus.Client(`ws://${location.host}`);
 
+// The room we're currently in (null between sessions). Input listeners are
+// registered ONCE at module level and route through this reference, so
+// rejoining after being shot down never double-registers handlers.
+let currentRoom = null;
+
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
   const name = nameInput.value.trim();
@@ -21,10 +26,44 @@ form.addEventListener('submit', async (event) => {
     lobbyDiv.classList.remove('hidden');
     status.textContent = `connected as ${name} (session ${room.sessionId})`;
     startGame(room);
-    room.onLeave(() => { status.textContent = 'disconnected'; });
   } catch (err) {
     status.textContent = `failed to join: ${err.message}`;
   }
+});
+
+// --- input: send {thrust, roll, pitch} whenever a relevant key changes ---
+const TRACKED = new Set(['w', 's', 'a', 'd', 'i', 'k']);
+const held = new Set();
+const axis = (pos, neg) => (held.has(pos) ? 1 : 0) - (held.has(neg) ? 1 : 0);
+const sendInput = () => currentRoom?.send('input', {
+  thrust: axis('i', 'k'), // i = accelerate, k = decelerate
+  roll: axis('d', 'a'),
+  pitch: axis('s', 'w'), // stick-style: w = nose down, s = nose up
+});
+window.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT') return; // typing in a form, not flying
+  const key = e.key.toLowerCase();
+  if (TRACKED.has(key) && !held.has(key)) { held.add(key); sendInput(); }
+});
+window.addEventListener('keyup', (e) => {
+  const key = e.key.toLowerCase();
+  if (TRACKED.has(key)) { held.delete(key); sendInput(); }
+});
+
+// fire on left click: no payload — the server aims from our replicated
+// orientation, so there's no client geometry to trust (or spoof)
+document.getElementById('game').addEventListener('click', () => {
+  currentRoom?.send('fire');
+});
+
+// --- temporary drag tuner: server owns the value, we just display & send ---
+const dragInput = document.getElementById('drag-input');
+document.getElementById('drag-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const value = parseFloat(dragInput.value);
+  if (Number.isFinite(value)) currentRoom?.send('setDrag', value);
+  dragInput.value = '';
+  dragInput.blur(); // give the keyboard back to flight controls
 });
 
 // Decode the angular-velocity quaternion (a local-frame rotation per second)
@@ -119,6 +158,8 @@ function makeStarfield(count = 2000, rMin = 20, rMax = 160) {
 }
 
 function startGame(room) {
+  currentRoom = room;
+
   // --- scene ---
   const hud = document.getElementById('hud');
   const canvas = document.getElementById('game');
@@ -158,40 +199,52 @@ function startGame(room) {
     listItems.delete(sessionId);
   });
 
-  // --- input: send {thrust, roll, pitch} whenever a relevant key changes ---
-  const TRACKED = new Set(['w', 's', 'a', 'd', 'i', 'k']);
-  const held = new Set();
-  const axis = (pos, neg) => (held.has(pos) ? 1 : 0) - (held.has(neg) ? 1 : 0);
-  const sendInput = () => room.send('input', {
-    thrust: axis('i', 'k'), // i = accelerate, k = decelerate
-    roll: axis('d', 'a'),
-    pitch: axis('s', 'w'), // stick-style: w = nose down, s = nose up
-  });
-  window.addEventListener('keydown', (e) => {
-    if (e.target.tagName === 'INPUT') return; // typing in a form, not flying
-    const key = e.key.toLowerCase();
-    if (TRACKED.has(key) && !held.has(key)) { held.add(key); sendInput(); }
-  });
-  window.addEventListener('keyup', (e) => {
-    const key = e.key.toLowerCase();
-    if (TRACKED.has(key)) { held.delete(key); sendInput(); }
+  // --- lasers: transient broadcast events, not schema state — draw a line
+  // for ~150ms and throw it away
+  room.onMessage('laser', ({ ox, oy, oz, dx, dy, dz, len }) => {
+    const geometry = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(ox, oy, oz),
+      new THREE.Vector3(ox + dx * len, oy + dy * len, oz + dz * len),
+    ]);
+    const material = new THREE.LineBasicMaterial({ color: 0x00ff66 });
+    const line = new THREE.Line(geometry, material);
+    scene.add(line);
+    setTimeout(() => {
+      scene.remove(line);
+      geometry.dispose();
+      material.dispose();
+    }, 150);
   });
 
-  // --- temporary drag tuner: server owns the value, we just display & send ---
+  // --- temporary drag tuner display: server owns the value ---
   const dragCurrent = document.getElementById('drag-current');
-  const dragInput = document.getElementById('drag-input');
   $(room.state).listen('drag', (value) => { dragCurrent.textContent = value.toFixed(2); });
-  document.getElementById('drag-form').addEventListener('submit', (e) => {
-    e.preventDefault();
-    const value = parseFloat(dragInput.value);
-    if (Number.isFinite(value)) room.send('setDrag', value);
-    dragInput.value = '';
-    dragInput.blur(); // give the keyboard back to flight controls
+
+  // --- getting shot down (code 4000) returns us to the name screen cleanly ---
+  let running = true; // render loop checks this before scheduling another frame
+  room.onLeave((code) => {
+    if (code === 4000) {
+      // teardown: stop rendering, drop all per-session UI/scene bookkeeping
+      running = false;
+      currentRoom = null;
+      held.clear();
+      meshes.forEach((mesh) => { scene.remove(mesh); mesh.geometry.dispose(); });
+      meshes.clear();
+      listItems.clear();
+      playerList.innerHTML = '';
+      renderer.dispose();
+      lobbyDiv.classList.add('hidden');
+      form.classList.remove('hidden');
+      status.textContent = 'you were shot down — enter a name to rejoin';
+    } else {
+      status.textContent = 'disconnected';
+    }
   });
 
   // --- render loop: copy server state onto meshes, chase-cam our own ship ---
   const camOffset = new THREE.Vector3();
   function render() {
+    if (!running) return;
     // state arrives shortly *after* joinOrCreate resolves — skip until synced
     room.state.players?.forEach((p, sessionId) => {
       const mesh = meshes.get(sessionId);
