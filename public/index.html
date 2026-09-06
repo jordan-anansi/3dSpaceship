@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>3dSpaceship — Lobby</title>
+  <style>
+    body { font-family: monospace; background: #0b0e1a; color: #dfe6ff; display: flex; justify-content: center; padding-top: 4vh; }
+    main { width: 720px; }
+    h1 { font-size: 1.2rem; }
+    input, button { font-family: inherit; font-size: 1rem; padding: 0.4rem; }
+    input { width: 200px; }
+    ul { list-style: none; padding: 0; display: flex; gap: 1rem; flex-wrap: wrap; }
+    li { padding: 0.2rem 0.5rem; border: 1px solid #2a3050; }
+    .hidden { display: none; }
+    #status, #controls-hint { color: #7f8ab8; font-size: 0.85rem; }
+    #drag-form { margin-top: 0.5rem; font-size: 0.85rem; }
+    #drag-form input { width: 90px; font-size: 0.85rem; }
+    #drag-form button { font-size: 0.85rem; }
+    #game { width: 720px; height: 450px; display: block; border: 1px solid #2a3050; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>3dSpaceship</h1>
+
+    <form id="join-form">
+      <input id="name-input" placeholder="your name" maxlength="24" autocomplete="off" required />
+      <button type="submit">Join</button>
+    </form>
+
+    <div id="lobby" class="hidden">
+      <ul id="player-list"></ul>
+      <canvas id="game"></canvas>
+      <p id="hud">roll 0°/s &nbsp; pitch 0°/s &nbsp; speed 0.0</p>
+      <p id="controls-hint">i/k: accel/decel &nbsp; w/s: pitch down/up &nbsp; a/d: roll</p>
+      <form id="drag-form">
+        <label>drag: <span id="drag-current">…</span></label>
+        <input id="drag-input" type="number" step="0.05" min="0" max="5" placeholder="new value" />
+        <button type="submit">set</button>
+      </form>
+    </div>
+
+    <p id="status"></p>
+  </main>
+
+  <script src="/lib/colyseus.js"></script>
+  <script type="importmap">
+    { "imports": { "three": "/lib/three/three.module.js" } }
+  </script>
+  <script type="module" src="/client.js"></script>
+</body>
+</html>

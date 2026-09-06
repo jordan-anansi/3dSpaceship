@@ -1,0 +1,27 @@
+{
+  "name": "3dspaceship",
+  "version": "1.0.0",
+  "description": "3D multiplayer web game — Three.js client, Colyseus server",
+  "private": true,
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts"
+  },
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@colyseus/core": "^0.16.24",
+    "@colyseus/schema": "^3.0.0",
+    "@colyseus/ws-transport": "^0.16.5",
+    "express": "^4.21.0",
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^26.4.1",
+    "@types/three": "^0.185.4",
+    "colyseus.js": "^0.16.22",
+    "tsx": "^4.23.13",
+    "typescript": "^5.9.0"
+  }
+}
