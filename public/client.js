@@ -1,5 +1,10 @@
 import * as THREE from 'three';
 
+// Which control scheme this client sends. MUST match CONTROL_SCHEME in
+// src/rooms/LobbyRoom.ts — the two are set by hand, there's no shared module.
+// 'flight' = thrust/roll/pitch torque model; 'strafe' = direct-look + strafe.
+const CONTROL_SCHEME = 'strafe';
+
 const form = document.getElementById('join-form');
 const nameInput = document.getElementById('name-input');
 const lobbyDiv = document.getElementById('lobby');
@@ -158,15 +163,27 @@ function startGame(room) {
     listItems.delete(sessionId);
   });
 
-  // --- input: send {thrust, roll, pitch} whenever a relevant key changes ---
-  const TRACKED = new Set(['w', 's', 'a', 'd', 'i', 'k']);
+  // --- input: send the scheme's fields whenever a relevant key changes ---
+  const TRACKED = CONTROL_SCHEME === 'flight'
+    ? new Set(['w', 's', 'a', 'd', 'i', 'k'])
+    : new Set(['w', 's', 'a', 'd', 'i', 'k', 'j', 'l']);
   const held = new Set();
   const axis = (pos, neg) => (held.has(pos) ? 1 : 0) - (held.has(neg) ? 1 : 0);
-  const sendInput = () => room.send('input', {
-    thrust: axis('i', 'k'), // i = accelerate, k = decelerate
-    roll: axis('d', 'a'),
-    pitch: axis('s', 'w'), // stick-style: w = nose down, s = nose up
-  });
+  const sendInput = () => room.send('input', CONTROL_SCHEME === 'flight'
+    ? {
+        thrust: axis('i', 'k'), // i = accelerate, k = decelerate
+        roll: axis('d', 'a'),
+        pitch: axis('s', 'w'), // stick-style: w = nose down, s = nose up
+      }
+    : {
+        moveZ: axis('w', 's'),     // forward/backward
+        moveX: axis('d', 'a'),     // strafe right/left
+        lookPitch: axis('i', 'k'), // look up/down
+        lookYaw: axis('j', 'l'),   // look left/right (left = +rotation about local up)
+      });
+  document.getElementById('controls-hint').textContent = CONTROL_SCHEME === 'flight'
+    ? 'i/k: accel/decel   w/s: pitch down/up   a/d: roll'
+    : 'w/s: fwd/back   a/d: strafe   i/k: look up/down   j/l: look left/right';
   window.addEventListener('keydown', (e) => {
     if (e.target.tagName === 'INPUT') return; // typing in a form, not flying
     const key = e.key.toLowerCase();

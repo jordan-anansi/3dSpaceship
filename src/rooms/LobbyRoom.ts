@@ -36,20 +36,35 @@ export class LobbyState extends Schema {
   @type('number') drag: number = 0.15;
 }
 
+// Which control scheme the server simulates. MUST match CONTROL_SCHEME in
+// public/client.js — the two are set by hand, there's no shared module.
+// 'flight' = thrust/roll/pitch torque model; 'strafe' = direct-look + strafe.
+const CONTROL_SCHEME: 'flight' | 'strafe' = 'strafe';
+
 interface Input {
-  thrust: number; // w/s  → -1..1
-  roll: number;   // a/d  → -1..1
-  pitch: number;  // j/k  → -1..1
+  // 'flight' scheme
+  thrust: number; // -1..1
+  roll: number;   // -1..1
+  pitch: number;  // -1..1
+  // 'strafe' scheme
+  moveZ: number;     // -1..1, +1 = forward
+  moveX: number;     // -1..1, +1 = strafe right
+  lookPitch: number; // -1..1, +1 = look up
+  lookYaw: number;   // -1..1, +1 = look left (positive rotation about local up)
 }
 
 const THRUST_ACCEL = 10; // units/s²
-const TURN_ACCEL = 2.5;  // rad/s² fed into the angular velocity
+const TURN_ACCEL = 2.5;  // rad/s² fed into the angular velocity ('flight')
+const LOOK_RATE = 90 * (Math.PI / 180); // direct look rotation, rad/s ('strafe')
 const MAX_SPEED = 40;    // units/s
 const MAX_SPIN = 40 * (Math.PI / 180); // total rotation rate, capped at 40°/s
 
 const IDENTITY = new Quaternion();
 const LOCAL_FORWARD = new Vector3(0, 0, -1); // three.js convention: -Z is "forward"
 const LOCAL_RIGHT = new Vector3(1, 0, 0);
+const LOCAL_UP = new Vector3(0, 1, 0);
+
+const NO_INPUT: Input = { thrust: 0, roll: 0, pitch: 0, moveZ: 0, moveX: 0, lookPitch: 0, lookYaw: 0 };
 
 const clamp1 = (v: unknown) => Math.max(-1, Math.min(1, Number(v) || 0));
 
@@ -72,6 +87,10 @@ export class LobbyRoom extends Room<LobbyState> {
         thrust: clamp1(msg?.thrust),
         roll: clamp1(msg?.roll),
         pitch: clamp1(msg?.pitch),
+        moveZ: clamp1(msg?.moveZ),
+        moveX: clamp1(msg?.moveX),
+        lookPitch: clamp1(msg?.lookPitch),
+        lookYaw: clamp1(msg?.lookYaw),
       });
     });
 
@@ -80,41 +99,68 @@ export class LobbyRoom extends Room<LobbyState> {
 
   update(dt: number) {
     this.state.players.forEach((p, sessionId) => {
-      const input = this.inputs.get(sessionId) ?? { thrust: 0, roll: 0, pitch: 0 };
+      const input = this.inputs.get(sessionId) ?? NO_INPUT;
 
       const orientation = new Quaternion(p.qx, p.qy, p.qz, p.qw);
-      const angVel = new Quaternion(p.avx, p.avy, p.avz, p.avw);
 
-      // inputs torque the angular velocity about the ship's LOCAL axes:
-      // roll spins around the nose (forward axis), pitch around the wings
-      if (input.roll) {
-        angVel.multiply(new Quaternion().setFromAxisAngle(LOCAL_FORWARD, input.roll * TURN_ACCEL * dt));
-      }
-      if (input.pitch) {
-        angVel.multiply(new Quaternion().setFromAxisAngle(LOCAL_RIGHT, input.pitch * TURN_ACCEL * dt));
-      }
-      // drag bleeds off spin the same way it bleeds off velocity below
-      angVel.slerp(IDENTITY, Math.min(1, this.state.drag * dt)).normalize();
+      if (CONTROL_SCHEME === 'flight') {
+        const angVel = new Quaternion(p.avx, p.avy, p.avz, p.avw);
 
-      // cap total spin: shrink the per-second rotation back to MAX_SPIN
-      const spinAngle = 2 * Math.acos(Math.min(1, Math.abs(angVel.w)));
-      if (spinAngle > MAX_SPIN) {
-        angVel.copy(new Quaternion().slerpQuaternions(IDENTITY, angVel.clone(), MAX_SPIN / spinAngle));
-      }
+        // inputs torque the angular velocity about the ship's LOCAL axes:
+        // roll spins around the nose (forward axis), pitch around the wings
+        if (input.roll) {
+          angVel.multiply(new Quaternion().setFromAxisAngle(LOCAL_FORWARD, input.roll * TURN_ACCEL * dt));
+        }
+        if (input.pitch) {
+          angVel.multiply(new Quaternion().setFromAxisAngle(LOCAL_RIGHT, input.pitch * TURN_ACCEL * dt));
+        }
+        // drag bleeds off spin the same way it bleeds off velocity below
+        angVel.slerp(IDENTITY, Math.min(1, this.state.drag * dt)).normalize();
 
-      // integrate orientation: apply dt's worth of the per-second spin.
-      // right-multiplying (orientation ⊗ step) rotates in the ship's own
-      // frame — this is what makes roll follow the player's orientation
-      // with no extra state.
-      const step = new Quaternion().slerpQuaternions(IDENTITY, angVel, dt);
-      orientation.multiply(step).normalize();
+        // cap total spin: shrink the per-second rotation back to MAX_SPIN
+        const spinAngle = 2 * Math.acos(Math.min(1, Math.abs(angVel.w)));
+        if (spinAngle > MAX_SPIN) {
+          angVel.copy(new Quaternion().slerpQuaternions(IDENTITY, angVel.clone(), MAX_SPIN / spinAngle));
+        }
 
-      // thrust accelerates along wherever the nose currently points
-      if (input.thrust) {
-        const forward = LOCAL_FORWARD.clone().applyQuaternion(orientation);
-        p.vx += forward.x * input.thrust * THRUST_ACCEL * dt;
-        p.vy += forward.y * input.thrust * THRUST_ACCEL * dt;
-        p.vz += forward.z * input.thrust * THRUST_ACCEL * dt;
+        // integrate orientation: apply dt's worth of the per-second spin.
+        // right-multiplying (orientation ⊗ step) rotates in the ship's own
+        // frame — this is what makes roll follow the player's orientation
+        // with no extra state.
+        const step = new Quaternion().slerpQuaternions(IDENTITY, angVel, dt);
+        orientation.multiply(step).normalize();
+
+        // thrust accelerates along wherever the nose currently points
+        if (input.thrust) {
+          const forward = LOCAL_FORWARD.clone().applyQuaternion(orientation);
+          p.vx += forward.x * input.thrust * THRUST_ACCEL * dt;
+          p.vy += forward.y * input.thrust * THRUST_ACCEL * dt;
+          p.vz += forward.z * input.thrust * THRUST_ACCEL * dt;
+        }
+
+        p.avx = angVel.x; p.avy = angVel.y; p.avz = angVel.z; p.avw = angVel.w;
+      } else {
+        // 'strafe': look inputs rotate the orientation DIRECTLY (no angular
+        // velocity, no inertia) about the ship's local axes; releasing the
+        // key stops rotation instantly. Angular-velocity quat stays identity.
+        if (input.lookPitch) {
+          orientation.multiply(new Quaternion().setFromAxisAngle(LOCAL_RIGHT, input.lookPitch * LOOK_RATE * dt));
+        }
+        if (input.lookYaw) {
+          orientation.multiply(new Quaternion().setFromAxisAngle(LOCAL_UP, input.lookYaw * LOOK_RATE * dt));
+        }
+        orientation.normalize();
+
+        // movement is still acceleration: forward/back plus strafe, in the
+        // ship's current local frame
+        if (input.moveZ || input.moveX) {
+          const accel = new Vector3()
+            .addScaledVector(LOCAL_FORWARD, input.moveZ)
+            .addScaledVector(LOCAL_RIGHT, input.moveX)
+            .applyQuaternion(orientation)
+            .multiplyScalar(THRUST_ACCEL * dt);
+          p.vx += accel.x; p.vy += accel.y; p.vz += accel.z;
+        }
       }
 
       const damp = Math.max(0, 1 - this.state.drag * dt);
@@ -131,7 +177,6 @@ export class LobbyRoom extends Room<LobbyState> {
       p.z += p.vz * dt;
 
       p.qx = orientation.x; p.qy = orientation.y; p.qz = orientation.z; p.qw = orientation.w;
-      p.avx = angVel.x; p.avy = angVel.y; p.avz = angVel.z; p.avw = angVel.w;
     });
   }
 
