@@ -55,22 +55,21 @@ const sendInput = () => currentRoom?.send('input', CONTROL_SCHEME === 'flight'
       lookYaw: axis('j', 'l'),   // look left/right (left = +rotation about local up)
     });
 document.getElementById('controls-hint').textContent = CONTROL_SCHEME === 'flight'
-  ? 'i/k: accel/decel   w/s: pitch down/up   a/d: roll   click: fire'
-  : 'w/s: fwd/back   a/d: strafe   i/k: look up/down   j/l: look left/right   click: fire';
+  ? 'i/k: accel/decel   w/s: pitch down/up   a/d: roll   space: fire'
+  : 'w/s: fwd/back   a/d: strafe   i/k: look up/down   j/l: look left/right   space: fire';
 window.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT') return; // typing in a form, not flying
+  if (e.key === ' ') {
+    e.preventDefault(); // don't scroll the page or "click" a focused button
+    if (!e.repeat) currentRoom?.send('fire');
+    return;
+  }
   const key = e.key.toLowerCase();
   if (TRACKED.has(key) && !held.has(key)) { held.add(key); sendInput(); }
 });
 window.addEventListener('keyup', (e) => {
   const key = e.key.toLowerCase();
   if (TRACKED.has(key)) { held.delete(key); sendInput(); }
-});
-
-// fire on left click: no payload — the server aims from our replicated
-// orientation, so there's no client geometry to trust (or spoof)
-document.getElementById('game').addEventListener('click', () => {
-  currentRoom?.send('fire');
 });
 
 // --- temporary drag tuner: server owns the value, we just display & send ---
