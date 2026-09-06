@@ -1,8 +1,15 @@
+// ARCHIVED 2026-09-06: client with the previous keyboard control schemes
+// ('flight' torque model and 'strafe' direct-look). Not loaded by anything.
+// The matching server branches still live in src/rooms/LobbyRoom.ts under
+// CONTROL_SCHEME 'flight' | 'strafe'. To restore, port the input section back
+// into public/client.js and set both CONTROL_SCHEME constants to match.
+
 import * as THREE from 'three';
 
-// This client implements the 'mouse' control scheme — CONTROL_SCHEME in
-// src/rooms/LobbyRoom.ts must be set to 'mouse'. The older keyboard schemes
-// ('flight', 'strafe') are archived in legacy/client-keyboard-controls.js.
+// Which control scheme this client sends. MUST match CONTROL_SCHEME in
+// src/rooms/LobbyRoom.ts — the two are set by hand, there's no shared module.
+// 'flight' = thrust/roll/pitch torque model; 'strafe' = direct-look + strafe.
+const CONTROL_SCHEME = 'strafe';
 
 const form = document.getElementById('join-form');
 const nameInput = document.getElementById('name-input');
@@ -35,16 +42,27 @@ form.addEventListener('submit', async (event) => {
   }
 });
 
-// --- keyboard input: send {moveZ, roll} whenever a relevant key changes ---
-const TRACKED = new Set(['w', 's', 'a', 'd']);
+// --- input: send the scheme's fields whenever a relevant key changes ---
+const TRACKED = CONTROL_SCHEME === 'flight'
+  ? new Set(['w', 's', 'a', 'd', 'i', 'k'])
+  : new Set(['w', 's', 'a', 'd', 'i', 'k', 'j', 'l']);
 const held = new Set();
 const axis = (pos, neg) => (held.has(pos) ? 1 : 0) - (held.has(neg) ? 1 : 0);
-const sendInput = () => currentRoom?.send('input', {
-  moveZ: axis('w', 's'), // forward/backward thrust
-  roll: axis('d', 'a'),  // constant-rate roll while held, no momentum
-});
-document.getElementById('controls-hint').textContent =
-  'click canvas to capture mouse   mouse: yaw/pitch   a/d: roll   w/s: fwd/back   space: fire   esc: release mouse';
+const sendInput = () => currentRoom?.send('input', CONTROL_SCHEME === 'flight'
+  ? {
+      thrust: axis('i', 'k'), // i = accelerate, k = decelerate
+      roll: axis('d', 'a'),
+      pitch: axis('s', 'w'), // stick-style: w = nose down, s = nose up
+    }
+  : {
+      moveZ: axis('w', 's'),     // forward/backward
+      moveX: axis('d', 'a'),     // strafe right/left
+      lookPitch: axis('i', 'k'), // look up/down
+      lookYaw: axis('j', 'l'),   // look left/right (left = +rotation about local up)
+    });
+document.getElementById('controls-hint').textContent = CONTROL_SCHEME === 'flight'
+  ? 'i/k: accel/decel   w/s: pitch down/up   a/d: roll   space: fire'
+  : 'w/s: fwd/back   a/d: strafe   i/k: look up/down   j/l: look left/right   space: fire';
 window.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT') return; // typing in a form, not flying
   if (e.key === ' ') {
@@ -59,29 +77,6 @@ window.addEventListener('keyup', (e) => {
   const key = e.key.toLowerCase();
   if (TRACKED.has(key)) { held.delete(key); sendInput(); }
 });
-
-// --- mouse look: pointer lock on the canvas, batch deltas to the server ---
-// Deltas accumulate between sends so fast mousemove bursts (touchpads fire
-// hundreds/sec) don't flood the socket; the server applies them as direct
-// yaw/pitch rotation.
-const gameCanvas = document.getElementById('game');
-gameCanvas.addEventListener('click', () => {
-  if (currentRoom) gameCanvas.requestPointerLock();
-});
-let lookDX = 0, lookDY = 0;
-window.addEventListener('mousemove', (e) => {
-  if (document.pointerLockElement === gameCanvas) {
-    lookDX += e.movementX;
-    lookDY += e.movementY;
-  }
-});
-setInterval(() => {
-  if ((lookDX || lookDY) && currentRoom) {
-    currentRoom.send('look', { dx: lookDX, dy: lookDY });
-    lookDX = 0;
-    lookDY = 0;
-  }
-}, 33);
 
 // --- temporary drag tuner: server owns the value, we just display & send ---
 const dragInput = document.getElementById('drag-input');
@@ -255,7 +250,6 @@ function startGame(room) {
       running = false;
       currentRoom = null;
       held.clear();
-      document.exitPointerLock();
       meshes.forEach((mesh) => { scene.remove(mesh); mesh.geometry.dispose(); });
       meshes.clear();
       listItems.clear();

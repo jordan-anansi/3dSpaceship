@@ -36,10 +36,13 @@ export class LobbyState extends Schema {
   @type('number') drag: number = 0.15;
 }
 
-// Which control scheme the server simulates. MUST match CONTROL_SCHEME in
-// public/client.js — the two are set by hand, there's no shared module.
-// 'flight' = thrust/roll/pitch torque model; 'strafe' = direct-look + strafe.
-const CONTROL_SCHEME: 'flight' | 'strafe' = 'strafe';
+// Which control scheme the server simulates. The client must send matching
+// input — public/client.js currently implements only 'mouse'; the older
+// keyboard clients ('flight', 'strafe') are archived in
+// legacy/client-keyboard-controls.js.
+// 'flight' = thrust/roll/pitch torque model; 'strafe' = direct-look + strafe;
+// 'mouse' = pointer-look (yaw/pitch from mouse deltas) + direct roll + thrust.
+const CONTROL_SCHEME: 'flight' | 'strafe' | 'mouse' = 'mouse';
 
 interface Input {
   // 'flight' scheme
@@ -56,6 +59,8 @@ interface Input {
 const THRUST_ACCEL = 10; // units/s²
 const TURN_ACCEL = 2.5;  // rad/s² fed into the angular velocity ('flight')
 const LOOK_RATE = 90 * (Math.PI / 180); // direct look rotation, rad/s ('strafe')
+const ROLL_RATE = 90 * (Math.PI / 180); // direct roll while key held, rad/s ('mouse')
+const MOUSE_SENS = 0.002;               // rad of rotation per pixel of mouse delta
 const MAX_SPEED = 40;    // units/s
 const MAX_SPIN = 40 * (Math.PI / 180); // total rotation rate, capped at 40°/s
 
@@ -77,6 +82,8 @@ const HIT_RADIUS = 0.87;      // bounding sphere around each ship
 export class LobbyRoom extends Room<LobbyState> {
   private inputs = new Map<string, Input>();
   private lastFireTime = new Map<string, number>();
+  // accumulated mouse deltas (pixels), drained by update() each tick ('mouse')
+  private pendingLook = new Map<string, { dx: number; dy: number }>();
 
   onCreate() {
     this.setState(new LobbyState());
@@ -99,6 +106,14 @@ export class LobbyRoom extends Room<LobbyState> {
         lookPitch: clamp1(msg?.lookPitch),
         lookYaw: clamp1(msg?.lookYaw),
       });
+    });
+
+    this.onMessage('look', (client, msg: { dx?: number; dy?: number }) => {
+      const clampPx = (v: unknown) => Math.max(-1000, Math.min(1000, Number(v) || 0));
+      const look = this.pendingLook.get(client.sessionId) ?? { dx: 0, dy: 0 };
+      look.dx += clampPx(msg?.dx);
+      look.dy += clampPx(msg?.dy);
+      this.pendingLook.set(client.sessionId, look);
     });
 
     this.onMessage('fire', (client) => this.fire(client));
@@ -148,7 +163,7 @@ export class LobbyRoom extends Room<LobbyState> {
         }
 
         p.avx = angVel.x; p.avy = angVel.y; p.avz = angVel.z; p.avw = angVel.w;
-      } else {
+      } else if (CONTROL_SCHEME === 'strafe') {
         // 'strafe': look inputs rotate the orientation DIRECTLY (no angular
         // velocity, no inertia) about the ship's local axes; releasing the
         // key stops rotation instantly. Angular-velocity quat stays identity.
@@ -169,6 +184,28 @@ export class LobbyRoom extends Room<LobbyState> {
             .applyQuaternion(orientation)
             .multiplyScalar(THRUST_ACCEL * dt);
           p.vx += accel.x; p.vy += accel.y; p.vz += accel.z;
+        }
+      } else {
+        // 'mouse': pointer deltas yaw/pitch the ship directly (mouse right =
+        // yaw right, mouse up = nose up); a/d roll at a constant rate while
+        // held. All rotation is momentum-free — nothing persists on release.
+        const look = this.pendingLook.get(sessionId);
+        if (look && (look.dx || look.dy)) {
+          orientation.multiply(new Quaternion().setFromAxisAngle(LOCAL_UP, -look.dx * MOUSE_SENS));
+          orientation.multiply(new Quaternion().setFromAxisAngle(LOCAL_RIGHT, -look.dy * MOUSE_SENS));
+          look.dx = 0; look.dy = 0;
+        }
+        if (input.roll) {
+          orientation.multiply(new Quaternion().setFromAxisAngle(LOCAL_FORWARD, input.roll * ROLL_RATE * dt));
+        }
+        orientation.normalize();
+
+        // w/s: accelerate along the nose
+        if (input.moveZ) {
+          const forward = LOCAL_FORWARD.clone().applyQuaternion(orientation);
+          p.vx += forward.x * input.moveZ * THRUST_ACCEL * dt;
+          p.vy += forward.y * input.moveZ * THRUST_ACCEL * dt;
+          p.vz += forward.z * input.moveZ * THRUST_ACCEL * dt;
         }
       }
 
@@ -252,5 +289,6 @@ export class LobbyRoom extends Room<LobbyState> {
     this.state.players.delete(client.sessionId);
     this.inputs.delete(client.sessionId);
     this.lastFireTime.delete(client.sessionId);
+    this.pendingLook.delete(client.sessionId);
   }
 }
