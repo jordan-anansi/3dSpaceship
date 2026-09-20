@@ -3,22 +3,41 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>3dSpaceship — Lobby</title>
+  <title>3dSpaceship</title>
   <style>
-    body { font-family: monospace; background: #0b0e1a; color: #dfe6ff; display: flex; justify-content: center; padding-top: 4vh; }
+    :root {
+      --bg: #0b0e1a;
+      --panel: #121830;
+      --line: #2a3050;
+      --ink: #dfe6ff;
+      --dim: #7f8ab8;
+      --go: #00ff66;
+      --warn: #ffb020;
+      --bad: #ff5566;
+      --scrap: #ffd24a;
+    }
+    body { font-family: monospace; background: var(--bg); color: var(--ink); display: flex; justify-content: center; padding-top: 4vh; }
     main { width: 720px; }
     h1 { font-size: 1.2rem; }
     input, button { font-family: inherit; font-size: 1rem; padding: 0.4rem; }
     input { width: 200px; }
-    ul { list-style: none; padding: 0; display: flex; gap: 1rem; flex-wrap: wrap; }
-    li { padding: 0.2rem 0.5rem; border: 1px solid #2a3050; }
-    .hidden { display: none; }
-    #status, #controls-hint { color: #7f8ab8; font-size: 0.85rem; }
-    #drag-form { margin-top: 0.5rem; font-size: 0.85rem; }
-    #drag-form input { width: 90px; font-size: 0.85rem; }
-    #drag-form button { font-size: 0.85rem; }
-    #game { width: 720px; height: 450px; display: block; border: 1px solid #2a3050; }
+    button { background: var(--panel); color: var(--ink); border: 1px solid var(--line); cursor: pointer; }
+    button:hover:not(:disabled) { border-color: var(--go); color: var(--go); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .hidden { display: none !important; }
+    #status, #controls-hint { color: var(--dim); font-size: 0.85rem; }
+
+    /* --- roster: one chip per ship, live hull + score --- */
+    ul { list-style: none; padding: 0; display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 0 0 0.5rem; }
+    li { padding: 0.15rem 0.5rem; border: 1px solid var(--line); font-size: 0.8rem; display: flex; gap: 0.5rem; }
+    li.me { border-color: var(--go); }
+    li.bot { color: var(--dim); }
+    li.dead { opacity: 0.4; text-decoration: line-through; }
+    li .score { color: var(--dim); }
+
+    #game { width: 720px; height: 450px; display: block; border: 1px solid var(--line); }
     #game-wrap { position: relative; width: 720px; }
+
     /* reticle: thin crosshair with an open center, marking the exact ray the
        server fires along; pointer-events none so canvas clicks still lock */
     #reticle {
@@ -34,6 +53,114 @@
     #reticle::after { top: 0; bottom: 0; left: 9px; width: 2px;
       -webkit-mask: linear-gradient(#000 35%, transparent 35% 65%, #000 65%);
       mask: linear-gradient(#000 35%, transparent 35% 65%, #000 65%); }
+
+    /* Speed feedback. Both of these are meant to read as peripheral pressure
+       rather than as a filter — if you notice them directly they're too
+       strong. Opacity is driven per-frame from client.js. */
+    #vignette, #speedlines {
+      position: absolute; inset: 0; pointer-events: none; opacity: 0;
+    }
+    /* corners close in slightly as you go faster */
+    #vignette {
+      background: radial-gradient(ellipse at center, transparent 42%, #000 100%);
+    }
+    /* dash streaks: hairline spokes radiating from the centre, masked so only
+       the outer rim of the frame ever shows them */
+    #speedlines {
+      background: repeating-conic-gradient(from 0deg,
+        rgba(214, 230, 255, 0.55) 0deg 0.3deg, transparent 0.3deg 3.6deg);
+      -webkit-mask: radial-gradient(ellipse at center, transparent 52%, #000 92%);
+      mask: radial-gradient(ellipse at center, transparent 52%, #000 92%);
+    }
+
+    /* juice: arc segments under the reticle, sharing one pool. Centered on
+       the same point as the reticle so it reads as part of the crosshair
+       rather than as HUD chrome. Geometry follows Deadlock's element_charges
+       ring: a 90deg arc split into N wedges, so the arc occupies the same
+       screen space no matter the segment count. A spent segment stays visible
+       as a thin dark outline rather than vanishing, and the one currently
+       refilling tints yellow. Rebuilt by client.js when juiceMax changes. */
+    #juice {
+      position: absolute; left: 50%; top: 50%; width: 132px; height: 132px;
+      transform: translate(-50%, -50%); pointer-events: none; overflow: visible;
+      opacity: 0.8;
+    }
+    #juice path { fill: none; stroke-linecap: butt; }
+    #juice .track { stroke: rgba(0, 0, 0, 0.5); stroke-width: 4; }
+    #juice .fill { stroke: rgba(232, 237, 248, 0.85); stroke-width: 8; }
+    #juice .fill.charging { stroke: rgba(255, 238, 0, 0.85); }
+
+    /* --- in-flight HUD, laid over the canvas corners --- */
+    .hud-layer { position: absolute; pointer-events: none; font-size: 0.8rem; }
+    #round-banner {
+      top: 8px; left: 50%; transform: translateX(-50%);
+      display: flex; gap: 0.8rem; align-items: baseline;
+      background: rgba(11, 14, 26, 0.7); padding: 0.2rem 0.7rem; border: 1px solid var(--line);
+    }
+    #round-banner .phase { color: var(--dim); text-transform: uppercase; letter-spacing: 0.1em; }
+    #round-banner .clock { color: var(--warn); }
+    #scrap-tag { top: 8px; right: 8px; color: var(--scrap); }
+
+    #hull-wrap { bottom: 8px; left: 8px; width: 180px; }
+    #hull-bar { height: 8px; border: 1px solid var(--line); background: rgba(0,0,0,0.5); }
+    #hull-fill { height: 100%; width: 100%; background: var(--go); transition: width 0.12s linear; }
+    #hull-fill.hurt { background: var(--warn); }
+    #hull-fill.critical { background: var(--bad); }
+    #hull-label { color: var(--dim); margin-bottom: 2px; }
+
+    /* weapon strip: bottom-right, one row per owned gun. The number is the
+       hotkey, so the strip doubles as the keybind reference. */
+    #weapon-strip { bottom: 8px; right: 8px; text-align: right; }
+    #weapon-strip .w { color: var(--dim); }
+    #weapon-strip .w.active { color: var(--go); }
+    #weapon-strip .w .key { opacity: 0.6; }
+    #fuse-tag { color: var(--scrap); margin-top: 2px; }
+
+    #respawn-notice {
+      top: 50%; left: 50%; transform: translate(-50%, -50%);
+      text-align: center; font-size: 1.1rem; color: var(--bad);
+    }
+    #respawn-notice .sub { font-size: 0.8rem; color: var(--dim); }
+
+    /* --- full-canvas overlay: start screen, shop, scoreboard --- */
+    #overlay {
+      position: absolute; inset: 0; background: rgba(6, 8, 18, 0.92);
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 0.8rem; padding: 1rem; box-sizing: border-box; text-align: center;
+    }
+    #overlay h2 { margin: 0; font-size: 1.1rem; letter-spacing: 0.1em; text-transform: uppercase; }
+    #overlay .sub { color: var(--dim); font-size: 0.8rem; margin: 0; }
+    #overlay-clock { color: var(--warn); font-size: 0.8rem; }
+
+    #cards { display: flex; gap: 0.8rem; align-items: stretch; justify-content: center; }
+    .card {
+      width: 250px; border: 1px solid var(--line); background: var(--panel);
+      padding: 0.7rem; display: flex; flex-direction: column; gap: 0.4rem; text-align: left;
+    }
+    .card.affordable { border-color: var(--go); }
+    .card .kind { font-size: 0.65rem; letter-spacing: 0.12em; color: var(--dim); text-transform: uppercase; }
+    .card.tech .kind { color: #6ad0ff; }
+    .card .name { font-size: 0.95rem; }
+    .card .blurb { font-size: 0.75rem; color: var(--dim); line-height: 1.4; flex: 1; }
+    .card .cost { font-size: 0.8rem; color: var(--scrap); }
+    .card .cost.cant { color: var(--bad); }
+    .card button { width: 100%; font-size: 0.85rem; }
+
+    #shop-scrap { font-size: 0.95rem; color: var(--scrap); }
+    #ready-line { font-size: 0.75rem; color: var(--dim); }
+
+    table#scoreboard { border-collapse: collapse; font-size: 0.8rem; }
+    table#scoreboard th { color: var(--dim); font-weight: normal; text-align: right; padding: 0.15rem 0.6rem; }
+    table#scoreboard td { text-align: right; padding: 0.15rem 0.6rem; }
+    table#scoreboard td.who, table#scoreboard th.who { text-align: left; }
+    table#scoreboard tr.me td { color: var(--go); }
+    table#scoreboard tr.bot td { color: var(--dim); }
+
+    /* --- dev tuners --- */
+    #tuners { margin-top: 0.5rem; font-size: 0.85rem; color: var(--dim); display: flex; gap: 1.5rem; align-items: center; flex-wrap: wrap; }
+    #tuners input[type=number] { width: 90px; font-size: 0.85rem; }
+    #tuners input[type=range] { width: 140px; vertical-align: middle; }
+    #tuners button { font-size: 0.85rem; }
   </style>
 </head>
 <body>
@@ -47,17 +174,75 @@
 
     <div id="lobby" class="hidden">
       <ul id="player-list"></ul>
+
       <div id="game-wrap">
         <canvas id="game"></canvas>
+        <div id="vignette"></div>
+        <div id="speedlines"></div>
         <div id="reticle"></div>
+        <svg id="juice" viewBox="0 0 132 132" aria-hidden="true"></svg>
+
+        <div id="round-banner" class="hud-layer hidden">
+          <span class="round">Round 1</span>
+          <span class="phase">combat</span>
+          <span class="clock">1:30</span>
+        </div>
+        <div id="scrap-tag" class="hud-layer hidden">0 scrap</div>
+
+        <div id="hull-wrap" class="hud-layer hidden">
+          <div id="hull-label">hull 100/100</div>
+          <div id="hull-bar"><div id="hull-fill"></div></div>
+        </div>
+
+        <div id="weapon-strip" class="hud-layer hidden">
+          <div id="weapon-list"></div>
+          <div id="fuse-tag" class="hidden">fuse 40 · wheel to adjust</div>
+        </div>
+
+        <div id="respawn-notice" class="hud-layer hidden">
+          <div>DESTROYED</div>
+          <div class="sub">respawning in 3s</div>
+        </div>
+
+        <div id="overlay">
+          <h2 id="overlay-title">Waiting</h2>
+          <p class="sub" id="overlay-sub"></p>
+          <div id="overlay-clock"></div>
+
+          <!-- lobby -->
+          <div id="overlay-lobby">
+            <button id="start-btn">Start Game</button>
+          </div>
+
+          <!-- shop -->
+          <div id="overlay-shop" class="hidden">
+            <div id="shop-scrap">0 scrap</div>
+            <div id="cards"></div>
+            <button id="skip-btn">Skip &mdash; bank the scrap</button>
+            <div id="ready-line"></div>
+          </div>
+
+          <!-- intermission -->
+          <div id="overlay-scores" class="hidden">
+            <table id="scoreboard"></table>
+          </div>
+        </div>
       </div>
-      <p id="hud">roll 0°/s &nbsp; pitch 0°/s &nbsp; speed 0.0</p>
-      <p id="controls-hint">i/k: accel/decel &nbsp; w/s: pitch down/up &nbsp; a/d: roll</p>
-      <form id="drag-form">
-        <label>drag: <span id="drag-current">…</span></label>
-        <input id="drag-input" type="number" step="0.05" min="0" max="5" placeholder="new value" />
-        <button type="submit">set</button>
-      </form>
+
+      <p id="hud">speed 0.0</p>
+      <p id="controls-hint"></p>
+
+      <div id="tuners">
+        <span>
+          drag: <span id="drag-current">…</span>
+          <input id="drag-input" type="number" step="0.05" min="0" max="5" placeholder="new value" />
+          <button id="drag-set" type="button">set</button>
+        </span>
+        <span>
+          <label for="roll-ramp-input">roll ramp-up: <span id="roll-ramp-current">0.60s</span></label>
+          <input id="roll-ramp-input" type="range" min="0" max="2" step="0.05" value="0.6" />
+        </span>
+      </div>
     </div>
 
     <p id="status"></p>
