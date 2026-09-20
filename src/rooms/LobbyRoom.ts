@@ -27,13 +27,43 @@ export class Player extends Schema {
   @type('number') avy: number = 0;
   @type('number') avz: number = 0;
   @type('number') avw: number = 1;
+
+  // sequence number of the last look batch folded into the orientation
+  // above. The client compares this against its own predicted fold to
+  // reconcile ('mouse' scheme only).
+  @type('number') lookSeq: number = 0;
+}
+
+// A bolt in flight. Only BIRTH state is replicated — the trajectory is a
+// straight line, so clients (and the server's own hit tests) place it
+// analytically on the shared tick timeline: origin + dir · BOLT_SPEED · age.
+// No per-tick position patches: zero ongoing bandwidth, perfectly smooth.
+export class Projectile extends Schema {
+  @type('string') shooter: string = '';
+
+  // spawn origin (the shooter's ship/eye — same point the reticle ray leaves)
+  @type('number') ox: number = 0;
+  @type('number') oy: number = 0;
+  @type('number') oz: number = 0;
+
+  // unit direction, from the shooter's seq-folded orientation
+  @type('number') dx: number = 0;
+  @type('number') dy: number = 0;
+  @type('number') dz: number = 0;
+
+  @type('number') spawnTick: number = 0;
 }
 
 export class LobbyState extends Schema {
   @type({ map: Player }) players = new MapSchema<Player>();
+  @type({ map: Projectile }) projectiles = new MapSchema<Projectile>();
   // linear drag: fraction of velocity shed per second; in state so every
   // client sees the live value (tunable via the 'setDrag' message)
   @type('number') drag: number = 0.15;
+  // simulation tick, incremented every update(). Clients echo the latest
+  // tick they've seen when firing so hits can be lag-compensated against
+  // the world they were actually looking at.
+  @type('number') tick: number = 0;
 }
 
 // Which control scheme the server simulates. The client must send matching
@@ -59,8 +89,10 @@ interface Input {
 const THRUST_ACCEL = 10; // units/s²
 const TURN_ACCEL = 2.5;  // rad/s² fed into the angular velocity ('flight')
 const LOOK_RATE = 90 * (Math.PI / 180); // direct look rotation, rad/s ('strafe')
-const ROLL_RATE = 90 * (Math.PI / 180); // direct roll while key held, rad/s ('mouse')
 const MOUSE_SENS = 0.002;               // rad of rotation per pixel of mouse delta
+// MOUSE_SENS and the yaw→pitch→roll batch fold below are duplicated in
+// public/client.js for prediction — client and server MUST integrate look
+// batches identically or the client's predicted orientation drifts.
 const MAX_SPEED = 40;    // units/s
 const MAX_SPIN = 40 * (Math.PI / 180); // total rotation rate, capped at 40°/s
 
@@ -73,17 +105,41 @@ const NO_INPUT: Input = { thrust: 0, roll: 0, pitch: 0, moveZ: 0, moveX: 0, look
 
 const clamp1 = (v: unknown) => Math.max(-1, Math.min(1, Number(v) || 0));
 
-// hitscan lasers: transient events, deliberately NOT in the schema — they are
-// broadcast once and rendered briefly by clients, never patched as state
+// projectile bolts: straight-line flight computed analytically from the tick
+// counter. BOLT_SPEED and TICK_DT are duplicated in public/client.js — both
+// sides must place bolts identically or clients render hits that the server
+// disagrees with. First-person: the camera sits AT the ship position, so the
+// bolt line IS the reticle's center ray (distant targets, at least — bolts
+// take travel time, so moving targets must be led).
 const FIRE_COOLDOWN_MS = 300;
-const LASER_RANGE = 400;      // units
-const HIT_RADIUS = 0.87;      // bounding sphere around each ship
+const BOLT_SPEED = 80;        // units/s — ships cap at 40, so bolts are dodgeable but leadable
+const BOLT_LIFE_TICKS = 300;  // 5s at 60Hz ⇒ 400 units of range
+const BOLT_HIT_RADIUS = 1.0;  // ship bounding sphere padded by the bolt's own size
+const TICK_DT = 1 / 60;       // analytic seconds-per-tick (setSimulationInterval default)
+
+// look batches ('mouse'): one accumulated chunk of client input. dx/dy in
+// pixels, roll already integrated to radians by the client (it knows its own
+// frame timing). seq is client-authored and strictly increasing.
+interface LookBatch { seq: number; dx: number; dy: number; roll: number }
+const MAX_LOOK_PX = 1000;     // per-batch pixel clamp (≈2 rad of turn)
+const MAX_BATCH_ROLL = 0.25;  // per-batch roll clamp, rad (~90°/s at 33ms batches)
+
+// ring buffer of everyone's positions per tick. Projectiles deliberately do
+// NOT use it — travel-time weapons are dodgeable by design, and rewinding
+// targets on top of that double-compensates ("dodged, died anyway"). Kept
+// (and still recorded each tick) for any future hitscan weapon.
+const HISTORY_TICKS = 32;
 
 export class LobbyRoom extends Room<LobbyState> {
   private inputs = new Map<string, Input>();
   private lastFireTime = new Map<string, number>();
-  // accumulated mouse deltas (pixels), drained by update() each tick ('mouse')
-  private pendingLook = new Map<string, { dx: number; dy: number }>();
+  // ordered queue of look batches per session, drained into the orientation
+  // by update() each tick — or early by fire(), so a shot's aim includes
+  // every batch the shooter had applied locally when they pulled the trigger
+  private pendingLook = new Map<string, LookBatch[]>();
+  // position snapshots for the last HISTORY_TICKS ticks (lag compensation)
+  private history: { tick: number; positions: Map<string, Vector3> }[] = [];
+  private boltCounter = 0;
 
   onCreate() {
     this.setState(new LobbyState());
@@ -108,20 +164,51 @@ export class LobbyRoom extends Room<LobbyState> {
       });
     });
 
-    this.onMessage('look', (client, msg: { dx?: number; dy?: number }) => {
-      const clampPx = (v: unknown) => Math.max(-1000, Math.min(1000, Number(v) || 0));
-      const look = this.pendingLook.get(client.sessionId) ?? { dx: 0, dy: 0 };
-      look.dx += clampPx(msg?.dx);
-      look.dy += clampPx(msg?.dy);
-      this.pendingLook.set(client.sessionId, look);
+    this.onMessage('look', (client, msg: Partial<LookBatch>) => {
+      const clampPx = (v: unknown) => Math.max(-MAX_LOOK_PX, Math.min(MAX_LOOK_PX, Number(v) || 0));
+      const seq = Math.floor(Number(msg?.seq) || 0);
+      const queue = this.pendingLook.get(client.sessionId) ?? [];
+      // seq must strictly increase past everything queued AND everything
+      // already folded — replays/reorders are dropped, not applied twice
+      const player = this.state.players.get(client.sessionId);
+      const lastSeq = queue.length ? queue[queue.length - 1].seq : (player?.lookSeq ?? 0);
+      if (seq <= lastSeq) return;
+      queue.push({
+        seq,
+        dx: clampPx(msg?.dx),
+        dy: clampPx(msg?.dy),
+        roll: Math.max(-MAX_BATCH_ROLL, Math.min(MAX_BATCH_ROLL, Number(msg?.roll) || 0)),
+      });
+      this.pendingLook.set(client.sessionId, queue);
     });
 
-    this.onMessage('fire', (client) => this.fire(client));
+    this.onMessage('fire', (client, msg: { seq?: number }) =>
+      this.fire(client, Math.floor(Number(msg?.seq) || 0)));
 
     this.setSimulationInterval((dtMs) => this.update(dtMs / 1000));
   }
 
+  // Fold queued look batches (up to and including upToSeq) into the player's
+  // orientation. Per batch: yaw, then pitch, then roll, about local axes —
+  // the exact fold the client runs for prediction, so given the same batches
+  // both sides compute the same quaternion.
+  private drainLook(p: Player, sessionId: string, upToSeq = Infinity) {
+    const queue = this.pendingLook.get(sessionId);
+    if (!queue?.length) return;
+    const orientation = new Quaternion(p.qx, p.qy, p.qz, p.qw);
+    while (queue.length && queue[0].seq <= upToSeq) {
+      const batch = queue.shift()!;
+      if (batch.dx) orientation.multiply(new Quaternion().setFromAxisAngle(LOCAL_UP, -batch.dx * MOUSE_SENS));
+      if (batch.dy) orientation.multiply(new Quaternion().setFromAxisAngle(LOCAL_RIGHT, -batch.dy * MOUSE_SENS));
+      if (batch.roll) orientation.multiply(new Quaternion().setFromAxisAngle(LOCAL_FORWARD, batch.roll));
+      orientation.normalize();
+      p.lookSeq = batch.seq;
+    }
+    p.qx = orientation.x; p.qy = orientation.y; p.qz = orientation.z; p.qw = orientation.w;
+  }
+
   update(dt: number) {
+    this.state.tick++;
     this.state.players.forEach((p, sessionId) => {
       const input = this.inputs.get(sessionId) ?? NO_INPUT;
 
@@ -187,25 +274,21 @@ export class LobbyRoom extends Room<LobbyState> {
         }
       } else {
         // 'mouse': pointer deltas yaw/pitch the ship directly (mouse right =
-        // yaw right, mouse up = nose up); a/d roll at a constant rate while
-        // held. All rotation is momentum-free — nothing persists on release.
-        const look = this.pendingLook.get(sessionId);
-        if (look && (look.dx || look.dy)) {
-          orientation.multiply(new Quaternion().setFromAxisAngle(LOCAL_UP, -look.dx * MOUSE_SENS));
-          orientation.multiply(new Quaternion().setFromAxisAngle(LOCAL_RIGHT, -look.dy * MOUSE_SENS));
-          look.dx = 0; look.dy = 0;
-        }
-        if (input.roll) {
-          orientation.multiply(new Quaternion().setFromAxisAngle(LOCAL_FORWARD, input.roll * ROLL_RATE * dt));
-        }
-        orientation.normalize();
+        // yaw right, mouse up = nose up); roll arrives pre-integrated inside
+        // the same batches. All rotation is momentum-free — nothing persists
+        // on release. drainLook writes p.q* directly; re-read it so thrust
+        // pushes along the freshly turned nose.
+        this.drainLook(p, sessionId);
+        orientation.set(p.qx, p.qy, p.qz, p.qw);
 
-        // w/s: accelerate along the nose
-        if (input.moveZ) {
-          const forward = LOCAL_FORWARD.clone().applyQuaternion(orientation);
-          p.vx += forward.x * input.moveZ * THRUST_ACCEL * dt;
-          p.vy += forward.y * input.moveZ * THRUST_ACCEL * dt;
-          p.vz += forward.z * input.moveZ * THRUST_ACCEL * dt;
+        // w/s: accelerate along the nose; a/d: strafe along the wings
+        if (input.moveZ || input.moveX) {
+          const accel = new Vector3()
+            .addScaledVector(LOCAL_FORWARD, input.moveZ)
+            .addScaledVector(LOCAL_RIGHT, input.moveX)
+            .applyQuaternion(orientation)
+            .multiplyScalar(THRUST_ACCEL * dt);
+          p.vx += accel.x; p.vy += accel.y; p.vz += accel.z;
         }
       }
 
@@ -224,11 +307,64 @@ export class LobbyRoom extends Room<LobbyState> {
 
       p.qx = orientation.x; p.qy = orientation.y; p.qz = orientation.z; p.qw = orientation.w;
     });
+
+    // projectiles: swept hit test along this tick's flight segment. Positions
+    // are analytic (origin + dir · speed · age) so server hits land exactly
+    // where clients render the bolt. It must be a SEGMENT test, not a point
+    // sample: a bolt covers ~1.3 units per tick — more than the hit radius —
+    // so point sampling would tunnel straight through ships.
+    const r2 = BOLT_HIT_RADIUS * BOLT_HIT_RADIUS;
+    this.state.projectiles.forEach((bolt, id) => {
+      const age = this.state.tick - bolt.spawnTick;
+      if (age <= 0) return;
+      if (age > BOLT_LIFE_TICKS) { this.state.projectiles.delete(id); return; }
+
+      const dir = new Vector3(bolt.dx, bolt.dy, bolt.dz);
+      const segStart = new Vector3(bolt.ox, bolt.oy, bolt.oz)
+        .addScaledVector(dir, BOLT_SPEED * (age - 1) * TICK_DT);
+      const segLen = BOLT_SPEED * TICK_DT;
+
+      // segment-sphere intersection against every other player; nearest wins
+      let victim: string | null = null;
+      let hitDist = segLen;
+      this.state.players.forEach((p, sessionId) => {
+        if (sessionId === bolt.shooter) return;
+        const toCenter = new Vector3(p.x, p.y, p.z).sub(segStart);
+        let t: number;
+        if (toCenter.lengthSq() <= r2) {
+          t = 0; // segment starts inside the sphere: point-blank hit
+        } else {
+          const b = toCenter.dot(dir);            // projection onto the segment
+          if (b < 0) return;                      // sphere is behind this segment
+          const d2 = toCenter.lengthSq() - b * b; // perpendicular distance²
+          if (d2 > r2) return;                    // flight path passes wide
+          t = b - Math.sqrt(r2 - d2);             // nearest intersection
+          if (t > segLen) return;                 // not reached yet this tick
+        }
+        if (t < hitDist) { hitDist = t; victim = sessionId; }
+      });
+
+      if (victim) {
+        console.log(`[lobby] ${bolt.shooter} shot down ${victim}`);
+        this.state.projectiles.delete(id);
+        this.clients.find((c) => c.sessionId === victim)?.leave(4000);
+      }
+    });
+
+    // snapshot everyone's position for lag-compensated rewind. Slots recycle
+    // every HISTORY_TICKS ticks; each stores its tick so a stale slot can
+    // never be mistaken for the requested one.
+    const positions = new Map<string, Vector3>();
+    this.state.players.forEach((p, sessionId) => positions.set(sessionId, new Vector3(p.x, p.y, p.z)));
+    this.history[this.state.tick % HISTORY_TICKS] = { tick: this.state.tick, positions };
   }
 
-  // server-authoritative hitscan: aim comes from the shooter's replicated
-  // orientation, never from client-supplied geometry
-  fire(client: Client) {
+  // server-authoritative fire: aim is derived from the shooter's input
+  // stream, never from client-supplied geometry. `seq` names the last look
+  // batch the shooter had applied locally — folding up to it reproduces
+  // exactly the orientation that was in the middle of their screen. The bolt
+  // spawns into replicated state; collision happens per-tick in update().
+  fire(client: Client, seq: number) {
     const now = Date.now();
     const last = this.lastFireTime.get(client.sessionId);
     if (last !== undefined && now - last < FIRE_COOLDOWN_MS) return;
@@ -237,43 +373,17 @@ export class LobbyRoom extends Room<LobbyState> {
     if (!shooter) return;
     this.lastFireTime.set(client.sessionId, now);
 
-    const origin = new Vector3(shooter.x, shooter.y, shooter.z);
-    const dir = LOCAL_FORWARD.clone()
-      .applyQuaternion(new Quaternion(shooter.qx, shooter.qy, shooter.qz, shooter.qw))
-      .normalize();
+    this.drainLook(shooter, client.sessionId, seq);
 
-    // ray-sphere intersection against every other player; nearest hit wins
-    let victim: string | null = null;
-    let hitDist = LASER_RANGE;
-    const r2 = HIT_RADIUS * HIT_RADIUS;
-    this.state.players.forEach((p, sessionId) => {
-      if (sessionId === client.sessionId) return;
-      const toCenter = new Vector3(p.x, p.y, p.z).sub(origin);
-      let t: number;
-      if (toCenter.lengthSq() <= r2) {
-        t = 0; // origin already inside the sphere: point-blank hit
-      } else {
-        const b = toCenter.dot(dir);          // projection onto the ray
-        if (b < 0) return;                    // sphere is behind us
-        const d2 = toCenter.lengthSq() - b * b; // perpendicular distance²
-        if (d2 > r2) return;                  // ray passes wide
-        t = b - Math.sqrt(r2 - d2);           // nearest intersection
-      }
-      if (t < hitDist) { hitDist = t; victim = sessionId; }
-    });
+    const aim = new Quaternion(shooter.qx, shooter.qy, shooter.qz, shooter.qw);
+    const dir = LOCAL_FORWARD.clone().applyQuaternion(aim).normalize();
 
-    this.broadcast('laser', {
-      ox: origin.x, oy: origin.y, oz: origin.z,
-      dx: dir.x, dy: dir.y, dz: dir.z,
-      len: victim ? hitDist : LASER_RANGE,
-      shooter: client.sessionId,
-      victim,
-    });
-
-    if (victim) {
-      console.log(`[lobby] ${client.sessionId} shot down ${victim}`);
-      this.clients.find((c) => c.sessionId === victim)?.leave(4000);
-    }
+    const bolt = new Projectile();
+    bolt.shooter = client.sessionId;
+    bolt.ox = shooter.x; bolt.oy = shooter.y; bolt.oz = shooter.z;
+    bolt.dx = dir.x; bolt.dy = dir.y; bolt.dz = dir.z;
+    bolt.spawnTick = this.state.tick;
+    this.state.projectiles.set(`bolt${this.boltCounter++}`, bolt);
   }
 
   onJoin(client: Client, options: { name?: string }) {

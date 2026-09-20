@@ -18,6 +18,22 @@
     #drag-form input { width: 90px; font-size: 0.85rem; }
     #drag-form button { font-size: 0.85rem; }
     #game { width: 720px; height: 450px; display: block; border: 1px solid #2a3050; }
+    #game-wrap { position: relative; width: 720px; }
+    /* reticle: thin crosshair with an open center, marking the exact ray the
+       server fires along; pointer-events none so canvas clicks still lock */
+    #reticle {
+      position: absolute; left: 50%; top: 50%; width: 20px; height: 20px;
+      transform: translate(-50%, -50%); pointer-events: none;
+    }
+    #reticle::before, #reticle::after {
+      content: ''; position: absolute; background: rgba(0, 255, 102, 0.8);
+    }
+    #reticle::before { left: 0; right: 0; top: 9px; height: 2px;
+      -webkit-mask: linear-gradient(90deg, #000 35%, transparent 35% 65%, #000 65%);
+      mask: linear-gradient(90deg, #000 35%, transparent 35% 65%, #000 65%); }
+    #reticle::after { top: 0; bottom: 0; left: 9px; width: 2px;
+      -webkit-mask: linear-gradient(#000 35%, transparent 35% 65%, #000 65%);
+      mask: linear-gradient(#000 35%, transparent 35% 65%, #000 65%); }
   </style>
 </head>
 <body>
@@ -31,7 +47,10 @@
 
     <div id="lobby" class="hidden">
       <ul id="player-list"></ul>
-      <canvas id="game"></canvas>
+      <div id="game-wrap">
+        <canvas id="game"></canvas>
+        <div id="reticle"></div>
+      </div>
       <p id="hud">roll 0°/s &nbsp; pitch 0°/s &nbsp; speed 0.0</p>
       <p id="controls-hint">i/k: accel/decel &nbsp; w/s: pitch down/up &nbsp; a/d: roll</p>
       <form id="drag-form">
@@ -46,7 +65,10 @@
 
   <script src="/lib/colyseus.js"></script>
   <script type="importmap">
-    { "imports": { "three": "/lib/three/three.module.js" } }
+    { "imports": {
+      "three": "/lib/three/three.module.js",
+      "three/addons/": "/lib/three-addons/"
+    } }
   </script>
   <script type="module" src="/client.js"></script>
 </body>

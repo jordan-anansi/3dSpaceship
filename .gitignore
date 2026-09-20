@@ -1,3 +1,10 @@
 node_modules/
 dist/
+bin/
 .claude/
+.DS_Store
+*.rar
+orion/
+Rocky_Asteroid_5.obj
+Rocky_Asteroid_5.mtl
+nave_orion.mtl

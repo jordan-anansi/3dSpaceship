@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 // This client implements the 'mouse' control scheme — CONTROL_SCHEME in
 // src/rooms/LobbyRoom.ts must be set to 'mouse'. The older keyboard schemes
@@ -11,7 +12,10 @@ const playerList = document.getElementById('player-list');
 const status = document.getElementById('status');
 
 // Same host/port that served this page, so it works on localhost and LAN alike.
-const client = new Colyseus.Client(`ws://${location.host}`);
+// Match the page's scheme too: an https page (e.g. behind a Cloudflare tunnel)
+// can't open an insecure ws:// socket — the browser blocks it as mixed content.
+const WS_PROTO = location.protocol === 'https:' ? 'wss' : 'ws';
+const client = new Colyseus.Client(`${WS_PROTO}://${location.host}`);
 
 // The room we're currently in (null between sessions). Input listeners are
 // registered ONCE at module level and route through this reference, so
@@ -29,27 +33,29 @@ form.addEventListener('submit', async (event) => {
     form.classList.add('hidden');
     lobbyDiv.classList.remove('hidden');
     status.textContent = `connected as ${name} (session ${room.sessionId})`;
-    startGame(room);
+    await startGame(room);
   } catch (err) {
     status.textContent = `failed to join: ${err.message}`;
   }
 });
 
-// --- keyboard input: send {moveZ, roll} whenever a relevant key changes ---
-const TRACKED = new Set(['w', 's', 'a', 'd']);
+// --- keyboard input: thrust goes to the server as {moveZ}; roll is folded
+// into look batches below so the whole orientation stays predictable ---
+const TRACKED = new Set(['w', 's', 'a', 'd', 'q', 'e']);
 const held = new Set();
 const axis = (pos, neg) => (held.has(pos) ? 1 : 0) - (held.has(neg) ? 1 : 0);
 const sendInput = () => currentRoom?.send('input', {
   moveZ: axis('w', 's'), // forward/backward thrust
-  roll: axis('d', 'a'),  // constant-rate roll while held, no momentum
+  moveX: axis('d', 'a'), // lateral strafe thrust
 });
 document.getElementById('controls-hint').textContent =
-  'click canvas to capture mouse   mouse: yaw/pitch   a/d: roll   w/s: fwd/back   space: fire   esc: release mouse';
+  'click canvas to capture mouse   mouse: yaw/pitch   q/e: roll   w/s: fwd/back   a/d: strafe   space: fire   esc: release mouse';
 window.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT') return; // typing in a form, not flying
   if (e.key === ' ') {
     e.preventDefault(); // don't scroll the page or "click" a focused button
-    if (!e.repeat) currentRoom?.send('fire');
+    // seq lets the server aim with exactly the orientation we predicted
+    if (!e.repeat) currentRoom?.send('fire', { seq: lookSeq });
     return;
   }
   const key = e.key.toLowerCase();
@@ -60,10 +66,37 @@ window.addEventListener('keyup', (e) => {
   if (TRACKED.has(key)) { held.delete(key); sendInput(); }
 });
 
-// --- mouse look: pointer lock on the canvas, batch deltas to the server ---
-// Deltas accumulate between sends so fast mousemove bursts (touchpads fire
-// hundreds/sec) don't flood the socket; the server applies them as direct
-// yaw/pitch rotation.
+// --- optimistic look: our own orientation, applied locally the instant the
+// input happens and reproduced by the server from the same batches ---
+//
+// Every LOOK_INTERVAL ms the accumulated mouse deltas plus dt's worth of held
+// roll become one sequence-numbered batch. We fold it into predictedQuat
+// immediately (zero-latency camera) and send the identical batch to the
+// server, which folds it identically — orientation is a deterministic fold
+// of the batch stream, so prediction shouldn't ever miss. The batch history
+// is kept so that if server and prediction do disagree at the same seq
+// (dropped state, a bug), we rebase onto the server quat and replay.
+//
+// MOUSE_SENS / ROLL_RATE and the yaw→pitch→roll order MUST match
+// src/rooms/LobbyRoom.ts.
+const MOUSE_SENS = 0.002;
+const ROLL_RATE = 90 * (Math.PI / 180);
+const LOOK_INTERVAL = 33;
+const LOCAL_FORWARD = new THREE.Vector3(0, 0, -1);
+const LOCAL_RIGHT = new THREE.Vector3(1, 0, 0);
+const LOCAL_UP = new THREE.Vector3(0, 1, 0);
+
+const predictedQuat = new THREE.Quaternion();
+let lookSeq = 0;
+let lookHistory = []; // [{seq, dx, dy, roll, q}] — q = predicted quat AFTER the batch
+
+function applyLookBatch(q, batch) {
+  if (batch.dx) q.multiply(new THREE.Quaternion().setFromAxisAngle(LOCAL_UP, -batch.dx * MOUSE_SENS));
+  if (batch.dy) q.multiply(new THREE.Quaternion().setFromAxisAngle(LOCAL_RIGHT, -batch.dy * MOUSE_SENS));
+  if (batch.roll) q.multiply(new THREE.Quaternion().setFromAxisAngle(LOCAL_FORWARD, batch.roll));
+  q.normalize();
+}
+
 const gameCanvas = document.getElementById('game');
 gameCanvas.addEventListener('click', () => {
   if (currentRoom) gameCanvas.requestPointerLock();
@@ -75,13 +108,47 @@ window.addEventListener('mousemove', (e) => {
     lookDY += e.movementY;
   }
 });
+let lastBatchTime = performance.now();
 setInterval(() => {
-  if ((lookDX || lookDY) && currentRoom) {
-    currentRoom.send('look', { dx: lookDX, dy: lookDY });
-    lookDX = 0;
-    lookDY = 0;
+  const nowMs = performance.now();
+  const dt = (nowMs - lastBatchTime) / 1000;
+  lastBatchTime = nowMs;
+  if (!currentRoom) { lookDX = 0; lookDY = 0; return; }
+  const roll = axis('e', 'q') * ROLL_RATE * dt;
+  if (!lookDX && !lookDY && !roll) return;
+  const batch = { seq: ++lookSeq, dx: lookDX, dy: lookDY, roll };
+  lookDX = 0;
+  lookDY = 0;
+  applyLookBatch(predictedQuat, batch);
+  lookHistory.push({ ...batch, q: predictedQuat.clone() });
+  if (lookHistory.length > 128) lookHistory.shift();
+  currentRoom.send('look', batch);
+}, LOOK_INTERVAL);
+
+// Called each frame with our replicated Player state. The server's quat
+// corresponds to lookSeq = p.lookSeq; compare it against what we predicted
+// at that same seq. Match (the normal case) → discard confirmed history.
+// Mismatch → rebase on the server quat and replay the unconfirmed batches.
+function reconcileLook(p) {
+  const idx = lookHistory.findIndex((h) => h.seq === p.lookSeq);
+  if (idx === -1) {
+    // nothing in flight: any gap between us and the server is drift, not
+    // pending input — adopt the server's answer if it's measurably different
+    if (lookHistory.length === 0 && p.lookSeq === lookSeq) {
+      const dot = Math.abs(p.qx * predictedQuat.x + p.qy * predictedQuat.y + p.qz * predictedQuat.z + p.qw * predictedQuat.w);
+      if (dot < 0.999999) predictedQuat.set(p.qx, p.qy, p.qz, p.qw);
+    }
+    return;
   }
-}, 33);
+  const h = lookHistory[idx];
+  const dot = Math.abs(p.qx * h.q.x + p.qy * h.q.y + p.qz * h.q.z + p.qw * h.q.w);
+  const pending = lookHistory.slice(idx + 1);
+  if (dot < 0.999999) {
+    predictedQuat.set(p.qx, p.qy, p.qz, p.qw);
+    pending.forEach((batch) => applyLookBatch(predictedQuat, batch));
+  }
+  lookHistory = pending; // everything ≤ p.lookSeq is confirmed
+}
 
 // --- temporary drag tuner: server owns the value, we just display & send ---
 const dragInput = document.getElementById('drag-input');
@@ -152,6 +219,120 @@ function makeJupiterTexture(w = 512, h = 256) {
   return texture;
 }
 
+// Preload the ship model once; per-player ships are cheap clones sharing the
+// template's geometry and materials. Resolves to null on failure, in which
+// case players fall back to the old cube.
+//
+// The GLB (converted from orion/nave_orion.obj) is authored at ~277 units
+// long with the nose toward +Z; the inner group normalizes it to our game
+// units — centered, ~2.4 long, nose along -Z — so the OUTER group can wear
+// the replicated quaternion/position directly.
+const shipTemplatePromise = new GLTFLoader().loadAsync('/models/orion.glb')
+  .then((gltf) => {
+    const model = gltf.scene;
+    // no backface culling: parts of the hull are modeled single-sided and
+    // vanish from some viewing angles with culling on
+    model.traverse((o) => { if (o.isMesh) o.material.side = THREE.DoubleSide; });
+    const box = new THREE.Box3().setFromObject(model);
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    model.position.copy(center).multiplyScalar(-1);
+    const norm = new THREE.Group();
+    norm.rotation.y = Math.PI;
+    norm.scale.setScalar(2.4 / size.z);
+    norm.add(model);
+    const template = new THREE.Group();
+    template.add(norm);
+    return template;
+  })
+  .catch((err) => {
+    console.warn('ship model failed to load, falling back to cubes', err);
+    return null;
+  });
+
+// Asteroid model (converted from Rocky_Asteroid_5.obj) dressed in its PBR
+// texture set (1K variants from Textures_Rocky_Asteroid_5.rar). flipY must
+// be false: the GLB's UVs use the glTF convention, not TextureLoader's
+// default. Resolves to null on failure → procedural stand-in rocks.
+const asteroidTemplatePromise = new GLTFLoader().loadAsync('/models/asteroid.glb')
+  .then((gltf) => {
+    const model = gltf.scene;
+    const texLoader = new THREE.TextureLoader();
+    const loadTex = (url, colorSpace) => {
+      const tex = texLoader.load(url);
+      tex.flipY = false;
+      if (colorSpace) tex.colorSpace = colorSpace;
+      return tex;
+    };
+    const material = new THREE.MeshStandardMaterial({
+      map: loadTex('/textures/asteroid_diffuse.png', THREE.SRGBColorSpace),
+      normalMap: loadTex('/textures/asteroid_normal.png'),
+      roughnessMap: loadTex('/textures/asteroid_roughness.png'),
+      roughness: 1.4,
+      metalness: 0.0,
+    });
+    model.traverse((o) => { if (o.isMesh) o.material = material; });
+    // normalize so an instance scale of N gives a rock of radius ~N
+    const box = new THREE.Box3().setFromObject(model);
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    model.position.copy(center).multiplyScalar(-1);
+    const norm = new THREE.Group();
+    norm.scale.setScalar(2 / Math.max(size.x, size.y, size.z));
+    norm.add(model);
+    const template = new THREE.Group();
+    template.add(norm);
+    return template;
+  })
+  .catch((err) => {
+    console.warn('asteroid model failed to load, falling back to procedural rocks', err);
+    return null;
+  });
+
+// The asteroid field is scenery only (no server collision) and hardcoded so
+// every client sees the identical rocks. r = approximate radius in units.
+const ASTEROID_FIELD = [
+  { p: [-40, 10, -80], r: 12, seed: 1 },
+  { p: [25, -15, -50], r: 7, seed: 2 },
+  { p: [-70, -20, 40], r: 16, seed: 3 },
+  { p: [80, 30, 60], r: 9, seed: 4 },
+  { p: [0, 42, -120], r: 14, seed: 5 },
+  { p: [45, -35, -20], r: 6, seed: 6 },
+];
+
+function makeAsteroid(template, { p, r, seed }) {
+  if (template) {
+    const mesh = template.clone(true); // shares geometry/material
+    mesh.scale.setScalar(r);
+    mesh.position.set(p[0], p[1], p[2]);
+    mesh.rotation.set(seed * 1.3, seed * 2.1, seed * 0.7); // varied resting pose
+    return mesh;
+  }
+  // procedural fallback rock
+  const geometry = new THREE.IcosahedronGeometry(r, 2);
+  // displace vertices with cheap position-hashed noise; displacement is a
+  // pure function of position, so shared corners stay welded (no cracks)
+  const pos = geometry.attributes.position;
+  const v = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i++) {
+    v.fromBufferAttribute(pos, i);
+    const n =
+      Math.sin(seed + v.x * 5.1) *
+      Math.sin(seed * 1.7 + v.y * 4.3) *
+      Math.sin(seed * 2.3 + v.z * 3.7);
+    v.multiplyScalar(1 + 0.35 * n);
+    pos.setXYZ(i, v.x, v.y, v.z);
+  }
+  geometry.computeVertexNormals();
+  const mesh = new THREE.Mesh(
+    geometry,
+    new THREE.MeshStandardMaterial({ color: 0x8a7a68, roughness: 0.95, flatShading: true })
+  );
+  mesh.position.set(p[0], p[1], p[2]);
+  mesh.rotation.set(seed * 1.3, seed * 2.1, seed * 0.7); // varied resting pose
+  return mesh;
+}
+
 function makePlanet() {
   const planet = new THREE.Mesh(
     new THREE.SphereGeometry(50, 48, 32),
@@ -184,8 +365,19 @@ function makeStarfield(count = 2000, rMin = 20, rMax = 160) {
   return new THREE.Points(geometry, material);
 }
 
-function startGame(room) {
+async function startGame(room) {
   currentRoom = room;
+  // null → cube / procedural-rock fallbacks
+  const [shipTemplate, asteroidTemplate] = await Promise.all([shipTemplatePromise, asteroidTemplatePromise]);
+
+  // fresh session: our predicted orientation starts at identity, same as the
+  // server-side Player it's about to mirror
+  predictedQuat.identity();
+  lookSeq = 0;
+  lookHistory = [];
+  lookDX = 0;
+  lookDY = 0;
+  lastBatchTime = performance.now();
 
   // --- scene ---
   const hud = document.getElementById('hud');
@@ -199,16 +391,41 @@ function startGame(room) {
   scene.add(makeStarfield());
   const planet = makePlanet();
   scene.add(planet);
+  const asteroids = ASTEROID_FIELD.map((spec) => {
+    const mesh = makeAsteroid(asteroidTemplate, spec);
+    scene.add(mesh);
+    return { mesh, spec };
+  });
+
+  // the ship GLB and asteroids use lit (Standard) materials — without lights
+  // they render pure black. Hemisphere + a weak opposing fill keep every
+  // viewing angle readable (a lone directional left ships in silhouette from
+  // the shadowed side). Basic-material scenery (starfield, planet, bolts)
+  // ignores these.
+  scene.add(new THREE.HemisphereLight(0xbdc9ff, 0x4a4038, 1.4));
+  const sun = new THREE.DirectionalLight(0xfff4e0, 2.2);
+  sun.position.set(60, 80, -40);
+  scene.add(sun);
+  const fill = new THREE.DirectionalLight(0x99aaff, 0.7);
+  fill.position.set(-50, -30, 60);
+  scene.add(fill);
 
   const camera = new THREE.PerspectiveCamera(70, canvas.clientWidth / canvas.clientHeight, 0.1, 1000);
 
-  // --- one cube + one list entry per player ---
-  const meshes = new Map(); // sessionId -> Mesh
+  // --- one ship + one list entry per player ---
+  const meshes = new Map(); // sessionId -> Object3D (ship clone or fallback cube)
+  window.__game = { scene, meshes, room }; // debug hook for headless inspection
   const listItems = new Map(); // sessionId -> <li>
   const $ = Colyseus.getStateCallbacks(room);
 
   $(room.state).players.onAdd((player, sessionId) => {
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshNormalMaterial());
+    // clones share the template's geometry/materials — cheap per player
+    const mesh = shipTemplate
+      ? shipTemplate.clone(true)
+      : new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshNormalMaterial());
+    // first-person: our own hull stays in the scene graph (it carries the
+    // authoritative position the camera and lasers read) but is never drawn
+    if (sessionId === room.sessionId) mesh.visible = false;
     scene.add(mesh);
     meshes.set(sessionId, mesh);
 
@@ -220,27 +437,68 @@ function startGame(room) {
 
   $(room.state).players.onRemove((_player, sessionId) => {
     const mesh = meshes.get(sessionId);
-    if (mesh) { scene.remove(mesh); mesh.geometry.dispose(); }
+    // ship clones share the template's geometry (never dispose it); only the
+    // fallback cube owns its own geometry
+    if (mesh) { scene.remove(mesh); mesh.geometry?.dispose(); }
     meshes.delete(sessionId);
     listItems.get(sessionId)?.remove();
     listItems.delete(sessionId);
   });
 
-  // --- lasers: transient broadcast events, not schema state — draw a line
-  // for ~150ms and throw it away
-  room.onMessage('laser', ({ ox, oy, oz, dx, dy, dz, len }) => {
-    const geometry = new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(ox, oy, oz),
-      new THREE.Vector3(ox + dx * len, oy + dy * len, oz + dz * len),
-    ]);
-    const material = new THREE.LineBasicMaterial({ color: 0x00ff66 });
-    const line = new THREE.Line(geometry, material);
-    scene.add(line);
+  // --- projectiles: the schema replicates only BIRTH state (origin, dir,
+  // spawnTick); each frame we place every bolt analytically on the shared
+  // tick timeline, so motion is perfectly smooth with zero ongoing patches.
+  // BOLT_SPEED / TICK_DT must match src/rooms/LobbyRoom.ts.
+  const BOLT_SPEED = 80;
+  const TICK_DT = 1 / 60;
+  const boltGeometry = new THREE.BoxGeometry(0.08, 0.08, 1.4); // long axis = flight axis
+  const boltMaterial = new THREE.MeshBasicMaterial({ color: 0x00ff66 });
+  // OUR bolts render from a muzzle below-right of the camera, converging back
+  // onto the true flight line — a bolt launched exactly at the eye would sit
+  // frozen at the reticle as a dot. The server still hit-tests the true line.
+  const MUZZLE_OFFSET = new THREE.Vector3(0.4, -0.35, -0.5);
+  const MUZZLE_CONVERGE_DIST = 40; // rejoin the true line this far out
+  const bolts = new Map(); // id -> {mesh, origin, dir, spawnTick}
+
+  // estimated server tick between patches: state.tick only advances at patch
+  // granularity (~50ms), so bolts placed on raw state.tick would stutter —
+  // extrapolate it locally against wall-clock time since the last patch
+  let tickBase = { tick: 0, at: performance.now() };
+  $(room.state).listen('tick', (tick) => { tickBase = { tick, at: performance.now() }; });
+  const estimatedTick = () => tickBase.tick + (performance.now() - tickBase.at) / (1000 * TICK_DT);
+
+  $(room.state).projectiles.onAdd((bolt, id) => {
+    let origin = new THREE.Vector3(bolt.ox, bolt.oy, bolt.oz);
+    let dir = new THREE.Vector3(bolt.dx, bolt.dy, bolt.dz);
+    if (bolt.shooter === room.sessionId) {
+      const rejoin = origin.clone().addScaledVector(dir, MUZZLE_CONVERGE_DIST);
+      origin = origin.add(MUZZLE_OFFSET.clone().applyQuaternion(predictedQuat));
+      dir = rejoin.sub(origin).normalize();
+    }
+    const mesh = new THREE.Mesh(boltGeometry, boltMaterial);
+    mesh.quaternion.setFromUnitVectors(LOCAL_FORWARD, dir);
+    mesh.position.copy(origin);
+    scene.add(mesh);
+    bolts.set(id, { mesh, origin, dir, spawnTick: bolt.spawnTick });
+  });
+
+  $(room.state).projectiles.onRemove((_bolt, id) => {
+    const entry = bolts.get(id);
+    if (!entry) return;
+    bolts.delete(id);
+    scene.remove(entry.mesh);
+    // brief flash where the bolt died (impact or end-of-life)
+    const flash = new THREE.Mesh(
+      new THREE.SphereGeometry(0.35, 8, 6),
+      new THREE.MeshBasicMaterial({ color: 0xccffdd })
+    );
+    flash.position.copy(entry.mesh.position);
+    scene.add(flash);
     setTimeout(() => {
-      scene.remove(line);
-      geometry.dispose();
-      material.dispose();
-    }, 150);
+      scene.remove(flash);
+      flash.geometry.dispose();
+      flash.material.dispose();
+    }, 120);
   });
 
   // --- temporary drag tuner display: server owns the value ---
@@ -256,8 +514,12 @@ function startGame(room) {
       currentRoom = null;
       held.clear();
       document.exitPointerLock();
-      meshes.forEach((mesh) => { scene.remove(mesh); mesh.geometry.dispose(); });
+      meshes.forEach((mesh) => { scene.remove(mesh); mesh.geometry?.dispose(); });
       meshes.clear();
+      bolts.forEach(({ mesh }) => scene.remove(mesh));
+      bolts.clear();
+      boltGeometry.dispose();
+      boltMaterial.dispose();
       listItems.clear();
       playerList.innerHTML = '';
       renderer.dispose();
@@ -269,8 +531,7 @@ function startGame(room) {
     }
   });
 
-  // --- render loop: copy server state onto meshes, chase-cam our own ship ---
-  const camOffset = new THREE.Vector3();
+  // --- render loop: copy server state onto meshes, first-person camera ---
   function render() {
     if (!running) return;
     // state arrives shortly *after* joinOrCreate resolves — skip until synced
@@ -281,8 +542,35 @@ function startGame(room) {
       mesh.quaternion.set(p.qx, p.qy, p.qz, p.qw);
     });
 
+    // bolts fly analytically: distance = speed × ticks since spawn
+    const nowTick = estimatedTick();
+    bolts.forEach(({ mesh, origin, dir, spawnTick }) => {
+      const dist = Math.max(0, (nowTick - spawnTick) * TICK_DT * BOLT_SPEED);
+      mesh.position.copy(origin).addScaledVector(dir, dist);
+    });
+
+    // asteroids drift and tumble as pure functions of the shared tick, so
+    // every client sees the identical field. Drift is sinusoidal (bounded —
+    // rocks orbit their home position, never wander off), tumble is a slow
+    // constant spin; both rates vary per rock via its seed.
+    const tSec = nowTick * TICK_DT;
+    asteroids.forEach(({ mesh, spec }) => {
+      const { p, seed } = spec;
+      mesh.position.set(
+        p[0] + 3 * Math.sin(tSec * 0.05 + seed * 7),
+        p[1] + 3 * Math.sin(tSec * 0.04 + seed * 13),
+        p[2] + 3 * Math.sin(tSec * 0.06 + seed * 3)
+      );
+      mesh.rotation.set(
+        seed * 1.3 + tSec * 0.03 * Math.sin(seed * 5),
+        seed * 2.1 + tSec * 0.05 * Math.cos(seed * 9),
+        seed * 0.7 + tSec * 0.02 * Math.sin(seed * 2)
+      );
+    });
+
     const myState = room.state.players?.get(room.sessionId);
     if (myState) {
+      reconcileLook(myState);
       const rates = spinRates(myState.avx, myState.avy, myState.avz, myState.avw);
       const speed = Math.hypot(myState.vx, myState.vy, myState.vz);
       hud.textContent =
@@ -293,11 +581,12 @@ function startGame(room) {
 
     const me = meshes.get(room.sessionId);
     if (me) {
-      // sit above and behind our ship, sharing its full orientation so the
-      // horizon rolls with us (it's a spaceship, not a car)
-      camOffset.set(0, 1.5, 5).applyQuaternion(me.quaternion);
-      camera.position.copy(me.position).add(camOffset);
-      camera.quaternion.copy(me.quaternion);
+      // first-person: camera sits AT the ship, wearing the PREDICTED
+      // orientation (position stays server-authoritative) so looking around
+      // has zero latency; everyone else's mesh keeps the replicated quat
+      me.quaternion.copy(predictedQuat);
+      camera.position.copy(me.position);
+      camera.quaternion.copy(predictedQuat);
     }
 
     planet.rotation.y += 0.0003; // slow spin, purely cosmetic

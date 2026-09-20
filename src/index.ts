@@ -17,6 +17,8 @@ app.use(
 );
 // three.module.js imports ./three.core.js internally, so expose the whole build dir
 app.use('/lib/three', express.static(path.join(__dirname, '..', 'node_modules', 'three', 'build')));
+// addons (GLTFLoader etc.) — mapped to the 'three/addons/' importmap prefix
+app.use('/lib/three-addons', express.static(path.join(__dirname, '..', 'node_modules', 'three', 'examples', 'jsm')));
 
 const httpServer = http.createServer(app);
 const gameServer = new Server({

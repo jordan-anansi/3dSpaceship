@@ -4,8 +4,11 @@
   "description": "3D multiplayer web game — Three.js client, Colyseus server",
   "private": true,
   "scripts": {
+    "help": "node help.js",
     "start": "tsx src/index.ts",
-    "dev": "tsx watch src/index.ts"
+    "dev": "tsx watch src/index.ts",
+    "url": "node lan-url.js",
+    "tunnel": "./bin/cloudflared tunnel --url http://localhost:${PORT:-2567}"
   },
   "license": "ISC",
   "type": "commonjs",
