@@ -21,6 +21,33 @@ const client = new Colyseus.Client(`${WS_PROTO}://${location.host}`);
 // registered ONCE at module level and route through this reference, so
 // rejoining after being shot down never double-registers handlers.
 let currentRoom = null;
+let activeTeardown = null;
+let activeGrid = null;
+let activeFireLaser = null;
+let laserLingerFrames = 4; // Starts at 4 frames, adjustable via slider
+
+const lingerSlider = document.getElementById('laser-linger-slider');
+const lingerVal = document.getElementById('laser-linger-val');
+function updateLingerDisplay(val) {
+  laserLingerFrames = Math.max(1, Math.min(60, val));
+  if (lingerSlider) lingerSlider.value = String(laserLingerFrames);
+  if (lingerVal) lingerVal.textContent = String(laserLingerFrames);
+}
+lingerSlider?.addEventListener('input', (e) => {
+  updateLingerDisplay(parseInt(e.target.value, 10) || 4);
+});
+
+const leaveBtn = document.getElementById('leave-btn');
+leaveBtn?.addEventListener('click', () => {
+  if (currentRoom) {
+    const room = currentRoom;
+    currentRoom = null;
+    room.leave();
+  }
+  if (activeTeardown) {
+    activeTeardown('returned to lobby');
+  }
+});
 
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -41,24 +68,58 @@ form.addEventListener('submit', async (event) => {
 
 // --- keyboard input: thrust goes to the server as {moveZ}; roll is folded
 // into look batches below so the whole orientation stays predictable ---
-const TRACKED = new Set(['w', 's', 'a', 'd', 'q', 'e']);
+const TRACKED = new Set(['w', 's', 'a', 'd', 'q', 'e', 'shift']);
 const held = new Set();
 const axis = (pos, neg) => (held.has(pos) ? 1 : 0) - (held.has(neg) ? 1 : 0);
 const sendInput = () => currentRoom?.send('input', {
   moveZ: axis('w', 's'), // forward/backward thrust
   moveX: axis('d', 'a'), // lateral strafe thrust
+  boost: held.has('shift'), // afterburner boost (shift key)
 });
 document.getElementById('controls-hint').textContent =
-  'click canvas to capture mouse   mouse: yaw/pitch   q/e: roll   w/s: fwd/back   a/d: strafe   space: fire   esc: release mouse';
+  'click canvas: capture mouse   mouse: yaw/pitch   q/e: roll   w/s: fwd/back   a/d: strafe   shift: boost   space: fire laser   f: fullscreen   g: toggle grid   esc: release mouse';
+
+function toggleFullscreen() {
+  const wrap = document.getElementById('game-wrap');
+  if (!wrap) return;
+  if (!document.fullscreenElement) {
+    wrap.requestFullscreen().catch((err) => {
+      console.warn('Fullscreen request failed:', err);
+    });
+  } else {
+    document.exitFullscreen().catch((err) => {
+      console.warn('Exit fullscreen failed:', err);
+    });
+  }
+}
+
 window.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT') return; // typing in a form, not flying
   if (e.key === ' ') {
     e.preventDefault(); // don't scroll the page or "click" a focused button
-    // seq lets the server aim with exactly the orientation we predicted
-    if (!e.repeat) currentRoom?.send('fire', { seq: lookSeq });
+    if (!e.repeat && currentRoom) {
+      currentRoom.send('fire', { seq: lookSeq });
+      if (activeFireLaser) activeFireLaser();
+    }
     return;
   }
   const key = e.key.toLowerCase();
+  if (key === 'f') {
+    toggleFullscreen();
+    return;
+  }
+  if (key === 'g') {
+    if (activeGrid) activeGrid.visible = !activeGrid.visible;
+    return;
+  }
+  if (key === '[') {
+    updateLingerDisplay(laserLingerFrames - 1);
+    return;
+  }
+  if (key === ']') {
+    updateLingerDisplay(laserLingerFrames + 1);
+    return;
+  }
   if (TRACKED.has(key) && !held.has(key)) { held.add(key); sendInput(); }
 });
 window.addEventListener('keyup', (e) => {
@@ -289,29 +350,81 @@ const asteroidTemplatePromise = new GLTFLoader().loadAsync('/models/asteroid.glb
     return null;
   });
 
-// The asteroid field is scenery only (no server collision) and hardcoded so
-// every client sees the identical rocks. r = approximate radius in units.
-const ASTEROID_FIELD = [
-  { p: [-40, 10, -80], r: 12, seed: 1 },
-  { p: [25, -15, -50], r: 7, seed: 2 },
-  { p: [-70, -20, 40], r: 16, seed: 3 },
-  { p: [80, 30, 60], r: 9, seed: 4 },
-  { p: [0, 42, -120], r: 14, seed: 5 },
-  { p: [45, -35, -20], r: 6, seed: 6 },
-];
+// Deterministic 100-asteroid field so every client generates identical scenery.
+function createDeterministicAsteroidField(count = 100) {
+  let s = 987654321;
+  const rnd = () => {
+    s = (s * 1664525 + 1013904223) % 4294967296;
+    return s / 4294967296;
+  };
 
-function makeAsteroid(template, { p, r, seed }) {
+  const field = [];
+  for (let i = 0; i < count; i++) {
+    // Radius: 5m (10m across) to 500m (1km across)
+    // Power-law distribution: many 10m-40m boulders, dozens of 50m-200m rocks, and several 200m-1km monoliths
+    const r = 5 + Math.pow(rnd(), 3.5) * 495;
+
+    // Distribute in a broad asteroid belt around the arena
+    // Push larger asteroids further out so they don't engulf the central spawn zone
+    const angle = rnd() * Math.PI * 2;
+    const baseDist = 120 + r * 1.6;
+    const dist = baseDist + rnd() * 2600;
+    const height = (rnd() - 0.5) * (500 + r * 0.8);
+    const p0 = [
+      Math.cos(angle) * dist,
+      height,
+      Math.sin(angle) * dist,
+    ];
+
+    // Inertia: larger asteroids have larger mass, moving and tumbling with slower periods
+    const speedFactor = Math.max(0.18, 1 - r / 520);
+    const driftAmp = [
+      (6 + rnd() * 18) * (0.6 + 0.4 * speedFactor),
+      (4 + rnd() * 14) * (0.6 + 0.4 * speedFactor),
+      (6 + rnd() * 18) * (0.6 + 0.4 * speedFactor),
+    ];
+    const driftFreq = [
+      (0.015 + rnd() * 0.03) * speedFactor,
+      (0.012 + rnd() * 0.025) * speedFactor,
+      (0.015 + rnd() * 0.03) * speedFactor,
+    ];
+    const driftPhase = [
+      rnd() * Math.PI * 2,
+      rnd() * Math.PI * 2,
+      rnd() * Math.PI * 2,
+    ];
+
+    // Rotational velocities: massive monoliths tumble very gently (0.01-0.03 rad/s),
+    // smaller 10m rocks tumble at 0.06-0.2 rad/s
+    const rot0 = [
+      rnd() * Math.PI * 2,
+      rnd() * Math.PI * 2,
+      rnd() * Math.PI * 2,
+    ];
+    const maxRot = 0.03 + 0.18 * speedFactor;
+    const rotV = [
+      (rnd() - 0.5) * maxRot,
+      (rnd() - 0.5) * maxRot,
+      (rnd() - 0.5) * maxRot,
+    ];
+
+    field.push({ p0, r, driftAmp, driftFreq, driftPhase, rot0, rotV, seed: i + 1 });
+  }
+  return field;
+}
+
+const ASTEROID_FIELD = createDeterministicAsteroidField(100);
+
+function makeAsteroid(template, { p0, r, rot0, seed }) {
   if (template) {
     const mesh = template.clone(true); // shares geometry/material
     mesh.scale.setScalar(r);
-    mesh.position.set(p[0], p[1], p[2]);
-    mesh.rotation.set(seed * 1.3, seed * 2.1, seed * 0.7); // varied resting pose
+    mesh.position.set(p0[0], p0[1], p0[2]);
+    mesh.rotation.set(rot0[0], rot0[1], rot0[2]);
     return mesh;
   }
   // procedural fallback rock
   const geometry = new THREE.IcosahedronGeometry(r, 2);
-  // displace vertices with cheap position-hashed noise; displacement is a
-  // pure function of position, so shared corners stay welded (no cracks)
   const pos = geometry.attributes.position;
   const v = new THREE.Vector3();
   for (let i = 0; i < pos.count; i++) {
@@ -328,40 +441,223 @@ function makeAsteroid(template, { p, r, seed }) {
     geometry,
     new THREE.MeshStandardMaterial({ color: 0x8a7a68, roughness: 0.95, flatShading: true })
   );
-  mesh.position.set(p[0], p[1], p[2]);
-  mesh.rotation.set(seed * 1.3, seed * 2.1, seed * 0.7); // varied resting pose
+  mesh.position.set(p0[0], p0[1], p0[2]);
+  mesh.rotation.set(rot0[0], rot0[1], rot0[2]);
   return mesh;
 }
 
-function makePlanet() {
-  const planet = new THREE.Mesh(
-    new THREE.SphereGeometry(50, 48, 32),
-    new THREE.MeshBasicMaterial({ map: makeJupiterTexture() })
-  );
-  planet.position.set(60, 25, -160); // off to the side so nobody spawns inside it
-  return planet;
+// Constant direction to the sun in world space.
+// Aligned so it illuminates the asteroids and the visible face of the planet.
+const SUN_DIR = new THREE.Vector3(0.6, 0.45, -0.65).normalize();
+const SUN_DISTANCE = 14000000; // 14,000 km away
+const SUN_CORE_RADIUS = 500000; // 500 km radius
+const SUN_CORONA_RADIUS = 680000; // 680 km radius
+
+function makeSun() {
+  const group = new THREE.Group();
+
+  // Core radiant sphere (unlit with warm golden-white starlight)
+  const coreGeom = new THREE.SphereGeometry(SUN_CORE_RADIUS, 32, 32);
+  const coreMat = new THREE.MeshBasicMaterial({ color: 0xfff6e8 });
+  group.add(new THREE.Mesh(coreGeom, coreMat));
+
+  // Outer corona glow halo (warm amber)
+  const coronaGeom = new THREE.SphereGeometry(SUN_CORONA_RADIUS, 32, 32);
+  const coronaMat = new THREE.MeshBasicMaterial({
+    color: 0xffba55,
+    transparent: true,
+    opacity: 0.38,
+    side: THREE.BackSide,
+  });
+  group.add(new THREE.Mesh(coronaGeom, coronaMat));
+
+  return group;
 }
 
-// random points filling a spherical shell around the origin, so there's
-// always something nearby drifting past to make our own motion visible
-function makeStarfield(count = 2000, rMin = 20, rMax = 160) {
+// Astronomical Moon: radius 1,737.4 km, placed 5,500 km away
+const MOON_RADIUS = 1737400; // 1,737.4 km in meters
+const MOON_DISTANCE = 5500000; // 5,500 km away
+const MOON_DIR = new THREE.Vector3(0.35, 0.18, -0.91).normalize();
+
+function makePlanet() {
+  const group = new THREE.Group();
+  const planetCenter = MOON_DIR.clone().multiplyScalar(MOON_DISTANCE);
+
+  // Solid planet sphere with procedural surface
+  const planetMesh = new THREE.Mesh(
+    new THREE.SphereGeometry(MOON_RADIUS, 64, 48),
+    new THREE.MeshStandardMaterial({
+      map: makeJupiterTexture(),
+      roughness: 0.88,
+      metalness: 0.05,
+    })
+  );
+  group.add(planetMesh);
+
+  // Atmospheric inner horizon haze (front-side Fresnel rim on planet's surface)
+  const innerAtmosphereGeom = new THREE.SphereGeometry(MOON_RADIUS * 1.012, 64, 48);
+  const innerAtmosphereMat = new THREE.ShaderMaterial({
+    uniforms: {
+      uColor: { value: new THREE.Color(0xffcb78) }, // Warm golden-amber atmospheric glow
+      uSunDir: { value: SUN_DIR },
+      uPlanetCenter: { value: planetCenter },
+    },
+    vertexShader: `
+      varying vec3 vWorldPosition;
+      #include <common>
+      #include <logdepthbuf_pars_vertex>
+      void main() {
+        vec4 worldPos = modelMatrix * vec4(position, 1.0);
+        vWorldPosition = worldPos.xyz;
+        gl_Position = projectionMatrix * viewMatrix * worldPos;
+        #include <logdepthbuf_vertex>
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 uColor;
+      uniform vec3 uSunDir;
+      uniform vec3 uPlanetCenter;
+      varying vec3 vWorldPosition;
+      #include <common>
+      #include <logdepthbuf_pars_fragment>
+      void main() {
+        #include <logdepthbuf_fragment>
+        vec3 worldNormal = normalize(vWorldPosition - uPlanetCenter);
+        vec3 viewDir = normalize(cameraPosition - vWorldPosition);
+        float VdotN = max(0.0, dot(viewDir, worldNormal));
+        float rim = pow(1.0 - VdotN, 2.8);
+
+        float sunDot = dot(worldNormal, uSunDir);
+        float sunFactor = clamp((sunDot + 0.25) / 1.25, 0.0, 1.0);
+
+        // Warm twilight copper to luminous golden sunlight
+        vec3 atmoColor = mix(vec3(0.68, 0.36, 0.16), uColor, 0.3 + 0.7 * sunFactor);
+        float alpha = rim * (0.2 + 0.8 * sunFactor) * 0.85;
+        gl_FragColor = vec4(atmoColor, alpha);
+      }
+    `,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  group.add(new THREE.Mesh(innerAtmosphereGeom, innerAtmosphereMat));
+
+  // Atmospheric outer halo (back-side shell extending into vacuum around the silhouette)
+  const outerAtmosphereGeom = new THREE.SphereGeometry(MOON_RADIUS * 1.045, 64, 48);
+  const outerAtmosphereMat = new THREE.ShaderMaterial({
+    uniforms: {
+      uColor: { value: new THREE.Color(0xffad54) }, // Warm radiant amber halo
+      uSunDir: { value: SUN_DIR },
+      uPlanetCenter: { value: planetCenter },
+    },
+    vertexShader: `
+      varying vec3 vWorldPosition;
+      #include <common>
+      #include <logdepthbuf_pars_vertex>
+      void main() {
+        vec4 worldPos = modelMatrix * vec4(position, 1.0);
+        vWorldPosition = worldPos.xyz;
+        gl_Position = projectionMatrix * viewMatrix * worldPos;
+        #include <logdepthbuf_vertex>
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 uColor;
+      uniform vec3 uSunDir;
+      uniform vec3 uPlanetCenter;
+      varying vec3 vWorldPosition;
+      #include <common>
+      #include <logdepthbuf_pars_fragment>
+      void main() {
+        #include <logdepthbuf_fragment>
+        vec3 worldNormal = normalize(vWorldPosition - uPlanetCenter);
+        vec3 viewDir = normalize(cameraPosition - vWorldPosition);
+
+        // Path-length normalization: dot(-viewDir, worldNormal) ranges from 0 (outer shell edge)
+        // to sqrt(1 - (Rp / Ro)^2) ≈ 0.2908 at the planet's silhouette limb.
+        float maxD = 0.2908;
+        float rim = clamp(dot(-viewDir, worldNormal) / maxD, 0.0, 1.0);
+        float halo = pow(rim, 2.0);
+
+        float sunDot = dot(worldNormal, uSunDir);
+        float sunFactor = clamp((sunDot + 0.25) / 1.25, 0.0, 1.0);
+
+        // Warm amber glow in vacuum around planet
+        vec3 atmoColor = mix(vec3(0.62, 0.32, 0.14), uColor, 0.35 + 0.65 * sunFactor);
+        float alpha = halo * (0.2 + 0.8 * sunFactor) * 0.9;
+        gl_FragColor = vec4(atmoColor, alpha);
+      }
+    `,
+    side: THREE.BackSide,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  group.add(new THREE.Mesh(outerAtmosphereGeom, outerAtmosphereMat));
+
+  group.position.copy(planetCenter);
+  return group;
+}
+
+function makeStarTexture() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 16;
+  canvas.height = 16;
+  const ctx = canvas.getContext('2d');
+  const gradient = ctx.createRadialGradient(8, 8, 0, 8, 8, 8);
+  gradient.addColorStop(0, 'rgba(255, 255, 255, 1)');
+  gradient.addColorStop(0.25, 'rgba(255, 255, 255, 0.9)');
+  gradient.addColorStop(0.6, 'rgba(220, 235, 255, 0.35)');
+  gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, 16, 16);
+  return new THREE.CanvasTexture(canvas);
+}
+
+// Emissive distant stars on the celestial sphere (positioned behind celestial bodies)
+function makeDistantStars(count = 3500, radius = 16000000) {
   const positions = new Float32Array(count * 3);
+  const colors = new Float32Array(count * 3);
+
+  const starColors = [
+    new THREE.Color(1.0, 1.0, 1.0),       // Pure brilliant white
+    new THREE.Color(0.85, 0.93, 1.0),     // Pale blue-white
+    new THREE.Color(0.72, 0.85, 1.0),     // Azure
+    new THREE.Color(1.0, 0.95, 0.82),     // Warm yellow
+    new THREE.Color(1.0, 0.80, 0.65),     // Amber giant
+  ];
+
   for (let i = 0; i < count; i++) {
-    // uniform random direction on the sphere
     const u = Math.random() * 2 - 1;
     const theta = Math.random() * 2 * Math.PI;
-    const s = Math.sqrt(1 - u * u);
-    // cube-root keeps density uniform through the shell's volume
-    const r = Math.cbrt(rMin ** 3 + Math.random() * (rMax ** 3 - rMin ** 3));
+    const s = Math.sqrt(Math.max(0, 1 - u * u));
+    const r = radius + (Math.random() - 0.5) * 60;
+
     positions[i * 3] = r * s * Math.cos(theta);
     positions[i * 3 + 1] = r * u;
     positions[i * 3 + 2] = r * s * Math.sin(theta);
+
+    const base = starColors[Math.floor(Math.random() * starColors.length)];
+    const lum = 0.45 + 0.55 * Math.pow(Math.random(), 2);
+    colors[i * 3] = base.r * lum;
+    colors[i * 3 + 1] = base.g * lum;
+    colors[i * 3 + 2] = base.b * lum;
   }
+
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  // sizeAttenuation shrinks distant points — the resulting parallax is
-  // what actually sells the sense of speed
-  const material = new THREE.PointsMaterial({ color: 0x9fb4ff, size: 0.4, sizeAttenuation: true });
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+  const material = new THREE.PointsMaterial({
+    size: 3.5,
+    map: makeStarTexture(),
+    vertexColors: true,
+    sizeAttenuation: false,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+
   return new THREE.Points(geometry, material);
 }
 
@@ -382,35 +678,53 @@ async function startGame(room) {
   // --- scene ---
   const hud = document.getElementById('hud');
   const canvas = document.getElementById('game');
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, logarithmicDepthBuffer: true });
   renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x0b0e1a);
-  scene.add(new THREE.GridHelper(200, 100, 0x3a4470, 0x1a2040)); // spatial reference
-  scene.add(makeStarfield());
+  scene.background = new THREE.Color(0x000000); // pure black space
+  const gridHelper = new THREE.GridHelper(3000, 100, 0x3a4470, 0x1a2040); // 3km spatial reference grid
+  scene.add(gridHelper);
+  activeGrid = gridHelper;
+
+  const distantStars = makeDistantStars();
+  scene.add(distantStars);
+
   const planet = makePlanet();
   scene.add(planet);
+
+  const sunMesh = makeSun();
+  scene.add(sunMesh);
+
   const asteroids = ASTEROID_FIELD.map((spec) => {
     const mesh = makeAsteroid(asteroidTemplate, spec);
     scene.add(mesh);
     return { mesh, spec };
   });
 
-  // the ship GLB and asteroids use lit (Standard) materials — without lights
-  // they render pure black. Hemisphere + a weak opposing fill keep every
-  // viewing angle readable (a lone directional left ships in silhouette from
-  // the shadowed side). Basic-material scenery (starfield, planet, bolts)
-  // ignores these.
-  scene.add(new THREE.HemisphereLight(0xbdc9ff, 0x4a4038, 1.4));
-  const sun = new THREE.DirectionalLight(0xfff4e0, 2.2);
-  sun.position.set(60, 80, -40);
-  scene.add(sun);
-  const fill = new THREE.DirectionalLight(0x99aaff, 0.7);
-  fill.position.set(-50, -30, 60);
-  scene.add(fill);
+  // Ambient base light (0.02) to softly illuminate all space bodies
+  const ambientLight = new THREE.AmbientLight(0xffffff, 0.02);
+  scene.add(ambientLight);
 
-  const camera = new THREE.PerspectiveCamera(70, canvas.clientWidth / canvas.clientHeight, 0.1, 1000);
+  // The Sun is the primary directional light: warm golden-white starlight
+  const SUN_INTENSITY = 2.8;
+  const sunLight = new THREE.DirectionalLight(0xffeed6, SUN_INTENSITY);
+  sunLight.position.copy(SUN_DIR);
+  sunLight.target.position.set(0, 0, 0);
+  scene.add(sunLight);
+  scene.add(sunLight.target);
+
+  // Opposing fill light: opposite the sun at 1/50th intensity with cool blue starlight/nebula tone
+  // Prevents dark sides from falling to pitch black while contrasting against warm sunlight.
+  const OPPOSITE_SUN_DIR = SUN_DIR.clone().negate();
+  const opposingLight = new THREE.DirectionalLight(0x8ab4f8, SUN_INTENSITY / 50);
+  opposingLight.position.copy(OPPOSITE_SUN_DIR);
+  opposingLight.target.position.set(0, 0, 0);
+  scene.add(opposingLight);
+  scene.add(opposingLight.target);
+
+  // Camera near 0.1m, far 25,000 km to encompass the Moon (5,500km) and stars (16,000km)
+  const camera = new THREE.PerspectiveCamera(70, canvas.clientWidth / canvas.clientHeight, 0.1, 25000000);
 
   // --- one ship + one list entry per player ---
   const meshes = new Map(); // sessionId -> Object3D (ship clone or fallback cube)
@@ -445,89 +759,184 @@ async function startGame(room) {
     listItems.delete(sessionId);
   });
 
-  // --- projectiles: the schema replicates only BIRTH state (origin, dir,
-  // spawnTick); each frame we place every bolt analytically on the shared
-  // tick timeline, so motion is perfectly smooth with zero ongoing patches.
-  // BOLT_SPEED / TICK_DT must match src/rooms/LobbyRoom.ts.
-  const BOLT_SPEED = 80;
-  const TICK_DT = 1 / 60;
-  const boltGeometry = new THREE.BoxGeometry(0.08, 0.08, 1.4); // long axis = flight axis
-  const boltMaterial = new THREE.MeshBasicMaterial({ color: 0x00ff66 });
-  // OUR bolts render from a muzzle below-right of the camera, converging back
-  // onto the true flight line — a bolt launched exactly at the eye would sit
-  // frozen at the reticle as a dot. The server still hit-tests the true line.
-  const MUZZLE_OFFSET = new THREE.Vector3(0.4, -0.35, -0.5);
-  const MUZZLE_CONVERGE_DIST = 40; // rejoin the true line this far out
-  const bolts = new Map(); // id -> {mesh, origin, dir, spawnTick}
+  // --- Instantaneous speed-of-light lasers ---
+  // Reusable unit cylinders oriented along Z (rotateX 90°)
+  const laserBeamGeom = new THREE.CylinderGeometry(0.08, 0.08, 1, 8);
+  laserBeamGeom.rotateX(Math.PI / 2);
+  const laserCoreGeom = new THREE.CylinderGeometry(0.028, 0.028, 1, 8);
+  laserCoreGeom.rotateX(Math.PI / 2);
 
-  // estimated server tick between patches: state.tick only advances at patch
-  // granularity (~50ms), so bolts placed on raw state.tick would stutter —
-  // extrapolate it locally against wall-clock time since the last patch
+  const activeLasers = [];
+  const activeFlashes = [];
+  const MUZZLE_OFFSET = new THREE.Vector3(0.4, -0.35, -0.5);
+
+  function spawnLaserBeam(start, dir, length, isHit) {
+    const end = start.clone().addScaledVector(dir, length);
+    const mid = start.clone().addScaledVector(dir, length * 0.5);
+
+    // Outer vibrant green laser glow
+    const glowMat = new THREE.MeshBasicMaterial({
+      color: 0x00ff88,
+      transparent: true,
+      opacity: 0.85,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const glowMesh = new THREE.Mesh(laserBeamGeom, glowMat);
+    glowMesh.position.copy(mid);
+    glowMesh.scale.set(1, 1, length);
+    glowMesh.lookAt(end);
+    scene.add(glowMesh);
+
+    // Inner bright white/lime energy core
+    const coreMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.95,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const coreMesh = new THREE.Mesh(laserCoreGeom, coreMat);
+    coreMesh.position.copy(mid);
+    coreMesh.scale.set(1, 1, length);
+    coreMesh.lookAt(end);
+    scene.add(coreMesh);
+
+    activeLasers.push({
+      glowMesh,
+      coreMesh,
+      totalFrames: laserLingerFrames,
+      framesRemaining: laserLingerFrames,
+    });
+
+    // Impact / endpoint flash
+    const flashGeom = new THREE.SphereGeometry(isHit ? 1.5 : 0.45, 8, 8);
+    const flashMat = new THREE.MeshBasicMaterial({
+      color: isHit ? 0xffffff : 0x88ffaa,
+      transparent: true,
+      opacity: 1.0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const flashMesh = new THREE.Mesh(flashGeom, flashMat);
+    flashMesh.position.copy(end);
+    scene.add(flashMesh);
+    const flashFrames = isHit ? Math.max(laserLingerFrames * 2, 6) : Math.max(laserLingerFrames, 3);
+    activeFlashes.push({
+      mesh: flashMesh,
+      totalFrames: flashFrames,
+      framesRemaining: flashFrames,
+    });
+  }
+
+  function fireLocalLaser() {
+    const origin = camera.position.clone();
+    const dir = LOCAL_FORWARD.clone().applyQuaternion(predictedQuat).normalize();
+    let hitDist = 5000;
+    let isHit = false;
+
+    // Fast local raycast against other ships for immediate impact prediction
+    meshes.forEach((mesh, id) => {
+      if (id === room.sessionId) return;
+      const toShip = mesh.position.clone().sub(origin);
+      const b = toShip.dot(dir);
+      if (b > 0 && b < hitDist) {
+        const d2 = toShip.lengthSq() - b * b;
+        if (d2 <= 1.96) { // 1.4m hit radius
+          hitDist = Math.max(0, b - Math.sqrt(Math.max(0, 1.96 - d2)));
+          isHit = true;
+        }
+      }
+    });
+
+    // Fire from wing/cannon muzzle converging to crosshairs aim point
+    const muzzle = origin.clone().add(MUZZLE_OFFSET.clone().applyQuaternion(predictedQuat));
+    const target = origin.clone().addScaledVector(dir, hitDist);
+    const beamDir = target.clone().sub(muzzle).normalize();
+    const beamLen = target.distanceTo(muzzle);
+    spawnLaserBeam(muzzle, beamDir, beamLen, isHit);
+  }
+
+  activeFireLaser = fireLocalLaser;
+
+  // Server broadcast: other players' laser beams
+  room.onMessage('laser', (data) => {
+    if (data.shooter === room.sessionId) return; // local player already predicted
+    const origin = new THREE.Vector3(data.ox, data.oy, data.oz);
+    const dir = new THREE.Vector3(data.dx, data.dy, data.dz);
+    spawnLaserBeam(origin, dir, data.dist, data.hit);
+  });
+
+  // Handle dynamic window and fullscreen resizing
+  function handleResize() {
+    const width = canvas.clientWidth;
+    const height = canvas.clientHeight;
+    if (width > 0 && height > 0) {
+      renderer.setSize(width, height, false);
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+    }
+  }
+  window.addEventListener('resize', handleResize);
+  document.addEventListener('fullscreenchange', handleResize);
+  handleResize();
+
+  // estimated server tick between patches: extrapolate against wall-clock time
+  const TICK_DT = 1 / 60;
   let tickBase = { tick: 0, at: performance.now() };
   $(room.state).listen('tick', (tick) => { tickBase = { tick, at: performance.now() }; });
   const estimatedTick = () => tickBase.tick + (performance.now() - tickBase.at) / (1000 * TICK_DT);
-
-  $(room.state).projectiles.onAdd((bolt, id) => {
-    let origin = new THREE.Vector3(bolt.ox, bolt.oy, bolt.oz);
-    let dir = new THREE.Vector3(bolt.dx, bolt.dy, bolt.dz);
-    if (bolt.shooter === room.sessionId) {
-      const rejoin = origin.clone().addScaledVector(dir, MUZZLE_CONVERGE_DIST);
-      origin = origin.add(MUZZLE_OFFSET.clone().applyQuaternion(predictedQuat));
-      dir = rejoin.sub(origin).normalize();
-    }
-    const mesh = new THREE.Mesh(boltGeometry, boltMaterial);
-    mesh.quaternion.setFromUnitVectors(LOCAL_FORWARD, dir);
-    mesh.position.copy(origin);
-    scene.add(mesh);
-    bolts.set(id, { mesh, origin, dir, spawnTick: bolt.spawnTick });
-  });
-
-  $(room.state).projectiles.onRemove((_bolt, id) => {
-    const entry = bolts.get(id);
-    if (!entry) return;
-    bolts.delete(id);
-    scene.remove(entry.mesh);
-    // brief flash where the bolt died (impact or end-of-life)
-    const flash = new THREE.Mesh(
-      new THREE.SphereGeometry(0.35, 8, 6),
-      new THREE.MeshBasicMaterial({ color: 0xccffdd })
-    );
-    flash.position.copy(entry.mesh.position);
-    scene.add(flash);
-    setTimeout(() => {
-      scene.remove(flash);
-      flash.geometry.dispose();
-      flash.material.dispose();
-    }, 120);
-  });
 
   // --- temporary drag tuner display: server owns the value ---
   const dragCurrent = document.getElementById('drag-current');
   $(room.state).listen('drag', (value) => { dragCurrent.textContent = value.toFixed(2); });
 
-  // --- getting shot down (code 4000) returns us to the name screen cleanly ---
+  // --- teardown and return to lobby ---
   let running = true; // render loop checks this before scheduling another frame
+
+  function teardownSession(statusMsg) {
+    if (!running) return;
+    running = false;
+    currentRoom = null;
+    activeTeardown = null;
+    activeGrid = null;
+    activeFireLaser = null;
+    window.removeEventListener('resize', handleResize);
+    document.removeEventListener('fullscreenchange', handleResize);
+    held.clear();
+    document.exitPointerLock();
+    meshes.forEach((mesh) => { scene.remove(mesh); mesh.geometry?.dispose(); });
+    meshes.clear();
+    activeLasers.forEach((item) => {
+      scene.remove(item.glowMesh);
+      scene.remove(item.coreMesh);
+      item.glowMesh.material.dispose();
+      item.coreMesh.material.dispose();
+    });
+    activeLasers.length = 0;
+    activeFlashes.forEach((item) => {
+      scene.remove(item.mesh);
+      item.mesh.geometry.dispose();
+      item.mesh.material.dispose();
+    });
+    activeFlashes.length = 0;
+    laserBeamGeom.dispose();
+    laserCoreGeom.dispose();
+    listItems.clear();
+    playerList.innerHTML = '';
+    renderer.dispose();
+    lobbyDiv.classList.add('hidden');
+    form.classList.remove('hidden');
+    status.textContent = statusMsg;
+  }
+
+  activeTeardown = teardownSession;
+
   room.onLeave((code) => {
     if (code === 4000) {
-      // teardown: stop rendering, drop all per-session UI/scene bookkeeping
-      running = false;
-      currentRoom = null;
-      held.clear();
-      document.exitPointerLock();
-      meshes.forEach((mesh) => { scene.remove(mesh); mesh.geometry?.dispose(); });
-      meshes.clear();
-      bolts.forEach(({ mesh }) => scene.remove(mesh));
-      bolts.clear();
-      boltGeometry.dispose();
-      boltMaterial.dispose();
-      listItems.clear();
-      playerList.innerHTML = '';
-      renderer.dispose();
-      lobbyDiv.classList.add('hidden');
-      form.classList.remove('hidden');
-      status.textContent = 'you were shot down — enter a name to rejoin';
+      teardownSession('you were shot down — enter a name to rejoin');
     } else {
-      status.textContent = 'disconnected';
+      teardownSession('returned to lobby');
     }
   });
 
@@ -542,29 +951,57 @@ async function startGame(room) {
       mesh.quaternion.set(p.qx, p.qy, p.qz, p.qw);
     });
 
-    // bolts fly analytically: distance = speed × ticks since spawn
     const nowTick = estimatedTick();
-    bolts.forEach(({ mesh, origin, dir, spawnTick }) => {
-      const dist = Math.max(0, (nowTick - spawnTick) * TICK_DT * BOLT_SPEED);
-      mesh.position.copy(origin).addScaledVector(dir, dist);
-    });
+
+    // Linger and clean up active instantaneous lasers and flashes by frame count
+    for (let i = activeLasers.length - 1; i >= 0; i--) {
+      const item = activeLasers[i];
+      item.framesRemaining--;
+      if (item.framesRemaining <= 0) {
+        scene.remove(item.glowMesh);
+        scene.remove(item.coreMesh);
+        item.glowMesh.material.dispose();
+        item.coreMesh.material.dispose();
+        activeLasers.splice(i, 1);
+      } else {
+        const factor = item.framesRemaining / item.totalFrames;
+        item.glowMesh.material.opacity = (0.35 + 0.65 * factor) * 0.85;
+        item.coreMesh.material.opacity = (0.4 + 0.6 * factor) * 0.95;
+      }
+    }
+
+    for (let i = activeFlashes.length - 1; i >= 0; i--) {
+      const item = activeFlashes[i];
+      item.framesRemaining--;
+      if (item.framesRemaining <= 0) {
+        scene.remove(item.mesh);
+        item.mesh.geometry.dispose();
+        item.mesh.material.dispose();
+        activeFlashes.splice(i, 1);
+      } else {
+        const factor = item.framesRemaining / item.totalFrames;
+        item.mesh.material.opacity = factor;
+        const scale = 1 + (1 - factor) * 0.6;
+        item.mesh.scale.set(scale, scale, scale);
+      }
+    }
 
     // asteroids drift and tumble as pure functions of the shared tick, so
     // every client sees the identical field. Drift is sinusoidal (bounded —
     // rocks orbit their home position, never wander off), tumble is a slow
-    // constant spin; both rates vary per rock via its seed.
+    // Asteroids gently drift and tumble: small velocities and rotational velocities
     const tSec = nowTick * TICK_DT;
     asteroids.forEach(({ mesh, spec }) => {
-      const { p, seed } = spec;
+      const { p0, driftAmp, driftFreq, driftPhase, rot0, rotV } = spec;
       mesh.position.set(
-        p[0] + 3 * Math.sin(tSec * 0.05 + seed * 7),
-        p[1] + 3 * Math.sin(tSec * 0.04 + seed * 13),
-        p[2] + 3 * Math.sin(tSec * 0.06 + seed * 3)
+        p0[0] + driftAmp[0] * Math.sin(tSec * driftFreq[0] + driftPhase[0]),
+        p0[1] + driftAmp[1] * Math.sin(tSec * driftFreq[1] + driftPhase[1]),
+        p0[2] + driftAmp[2] * Math.cos(tSec * driftFreq[2] + driftPhase[2])
       );
       mesh.rotation.set(
-        seed * 1.3 + tSec * 0.03 * Math.sin(seed * 5),
-        seed * 2.1 + tSec * 0.05 * Math.cos(seed * 9),
-        seed * 0.7 + tSec * 0.02 * Math.sin(seed * 2)
+        rot0[0] + tSec * rotV[0],
+        rot0[1] + tSec * rotV[1],
+        rot0[2] + tSec * rotV[2]
       );
     });
 
@@ -590,6 +1027,11 @@ async function startGame(room) {
     }
 
     planet.rotation.y += 0.0003; // slow spin, purely cosmetic
+
+    // Distant stars & Sun are effectively infinitely far away: track camera position
+    // so distance and angular size never change as the player flies through space
+    distantStars.position.copy(camera.position);
+    sunMesh.position.copy(camera.position).addScaledVector(SUN_DIR, SUN_DISTANCE);
 
     renderer.render(scene, camera);
     requestAnimationFrame(render);

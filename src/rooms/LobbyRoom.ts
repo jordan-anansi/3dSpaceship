@@ -84,16 +84,17 @@ interface Input {
   moveX: number;     // -1..1, +1 = strafe right
   lookPitch: number; // -1..1, +1 = look up
   lookYaw: number;   // -1..1, +1 = look left (positive rotation about local up)
+  boost?: boolean;   // afterburner boost to fly fast for testing
 }
 
-const THRUST_ACCEL = 10; // units/s²
+const THRUST_ACCEL = 40;     // base units/s²
+const BOOST_MULTIPLIER = 25; // 25x acceleration during shift-boost (1,000 units/s²)
 const TURN_ACCEL = 2.5;  // rad/s² fed into the angular velocity ('flight')
 const LOOK_RATE = 90 * (Math.PI / 180); // direct look rotation, rad/s ('strafe')
 const MOUSE_SENS = 0.002;               // rad of rotation per pixel of mouse delta
 // MOUSE_SENS and the yaw→pitch→roll batch fold below are duplicated in
 // public/client.js for prediction — client and server MUST integrate look
 // batches identically or the client's predicted orientation drifts.
-const MAX_SPEED = 40;    // units/s
 const MAX_SPIN = 40 * (Math.PI / 180); // total rotation rate, capped at 40°/s
 
 const IDENTITY = new Quaternion();
@@ -101,20 +102,15 @@ const LOCAL_FORWARD = new Vector3(0, 0, -1); // three.js convention: -Z is "forw
 const LOCAL_RIGHT = new Vector3(1, 0, 0);
 const LOCAL_UP = new Vector3(0, 1, 0);
 
-const NO_INPUT: Input = { thrust: 0, roll: 0, pitch: 0, moveZ: 0, moveX: 0, lookPitch: 0, lookYaw: 0 };
+const NO_INPUT: Input = { thrust: 0, roll: 0, pitch: 0, moveZ: 0, moveX: 0, lookPitch: 0, lookYaw: 0, boost: false };
 
 const clamp1 = (v: unknown) => Math.max(-1, Math.min(1, Number(v) || 0));
 
-// projectile bolts: straight-line flight computed analytically from the tick
-// counter. BOLT_SPEED and TICK_DT are duplicated in public/client.js — both
-// sides must place bolts identically or clients render hits that the server
-// disagrees with. First-person: the camera sits AT the ship position, so the
-// bolt line IS the reticle's center ray (distant targets, at least — bolts
-// take travel time, so moving targets must be led).
-const FIRE_COOLDOWN_MS = 300;
-const BOLT_SPEED = 80;        // units/s — ships cap at 40, so bolts are dodgeable but leadable
-const BOLT_LIFE_TICKS = 300;  // 5s at 60Hz ⇒ 400 units of range
-const BOLT_HIT_RADIUS = 1.0;  // ship bounding sphere padded by the bolt's own size
+// Instantaneous speed-of-light lasers: raycast hitscan resolved the millisecond
+// the trigger is pulled, with full 5km range and zero travel delay.
+const FIRE_COOLDOWN_MS = 200;
+const LASER_RANGE = 5000;     // 5 km speed-of-light instantaneous reach
+const LASER_HIT_RADIUS = 1.4; // ship bounding sphere radius
 const TICK_DT = 1 / 60;       // analytic seconds-per-tick (setSimulationInterval default)
 
 // look batches ('mouse'): one accumulated chunk of client input. dx/dy in
@@ -161,6 +157,7 @@ export class LobbyRoom extends Room<LobbyState> {
         moveX: clamp1(msg?.moveX),
         lookPitch: clamp1(msg?.lookPitch),
         lookYaw: clamp1(msg?.lookYaw),
+        boost: Boolean(msg?.boost),
       });
     });
 
@@ -241,12 +238,14 @@ export class LobbyRoom extends Room<LobbyState> {
         const step = new Quaternion().slerpQuaternions(IDENTITY, angVel, dt);
         orientation.multiply(step).normalize();
 
+        const accelMag = THRUST_ACCEL * (input.boost ? BOOST_MULTIPLIER : 1);
+
         // thrust accelerates along wherever the nose currently points
         if (input.thrust) {
           const forward = LOCAL_FORWARD.clone().applyQuaternion(orientation);
-          p.vx += forward.x * input.thrust * THRUST_ACCEL * dt;
-          p.vy += forward.y * input.thrust * THRUST_ACCEL * dt;
-          p.vz += forward.z * input.thrust * THRUST_ACCEL * dt;
+          p.vx += forward.x * input.thrust * accelMag * dt;
+          p.vy += forward.y * input.thrust * accelMag * dt;
+          p.vz += forward.z * input.thrust * accelMag * dt;
         }
 
         p.avx = angVel.x; p.avy = angVel.y; p.avz = angVel.z; p.avw = angVel.w;
@@ -264,12 +263,13 @@ export class LobbyRoom extends Room<LobbyState> {
 
         // movement is still acceleration: forward/back plus strafe, in the
         // ship's current local frame
+        const accelMag = THRUST_ACCEL * (input.boost ? BOOST_MULTIPLIER : 1);
         if (input.moveZ || input.moveX) {
           const accel = new Vector3()
             .addScaledVector(LOCAL_FORWARD, input.moveZ)
             .addScaledVector(LOCAL_RIGHT, input.moveX)
             .applyQuaternion(orientation)
-            .multiplyScalar(THRUST_ACCEL * dt);
+            .multiplyScalar(accelMag * dt);
           p.vx += accel.x; p.vy += accel.y; p.vz += accel.z;
         }
       } else {
@@ -282,73 +282,29 @@ export class LobbyRoom extends Room<LobbyState> {
         orientation.set(p.qx, p.qy, p.qz, p.qw);
 
         // w/s: accelerate along the nose; a/d: strafe along the wings
+        const accelMag = THRUST_ACCEL * (input.boost ? BOOST_MULTIPLIER : 1);
         if (input.moveZ || input.moveX) {
           const accel = new Vector3()
             .addScaledVector(LOCAL_FORWARD, input.moveZ)
             .addScaledVector(LOCAL_RIGHT, input.moveX)
             .applyQuaternion(orientation)
-            .multiplyScalar(THRUST_ACCEL * dt);
+            .multiplyScalar(accelMag * dt);
           p.vx += accel.x; p.vy += accel.y; p.vz += accel.z;
         }
       }
 
-      const damp = Math.max(0, 1 - this.state.drag * dt);
+      // Bypass drag during boost so afterburners can rapidly reach high testing speeds
+      const effectiveDrag = input.boost ? 0 : this.state.drag;
+      const damp = Math.max(0, 1 - effectiveDrag * dt);
       p.vx *= damp; p.vy *= damp; p.vz *= damp;
 
-      const speed = Math.hypot(p.vx, p.vy, p.vz);
-      if (speed > MAX_SPEED) {
-        const k = MAX_SPEED / speed;
-        p.vx *= k; p.vy *= k; p.vz *= k;
-      }
+      // Speed cap removed so players can fly as fast as they want for testing
 
       p.x += p.vx * dt;
       p.y += p.vy * dt;
       p.z += p.vz * dt;
 
       p.qx = orientation.x; p.qy = orientation.y; p.qz = orientation.z; p.qw = orientation.w;
-    });
-
-    // projectiles: swept hit test along this tick's flight segment. Positions
-    // are analytic (origin + dir · speed · age) so server hits land exactly
-    // where clients render the bolt. It must be a SEGMENT test, not a point
-    // sample: a bolt covers ~1.3 units per tick — more than the hit radius —
-    // so point sampling would tunnel straight through ships.
-    const r2 = BOLT_HIT_RADIUS * BOLT_HIT_RADIUS;
-    this.state.projectiles.forEach((bolt, id) => {
-      const age = this.state.tick - bolt.spawnTick;
-      if (age <= 0) return;
-      if (age > BOLT_LIFE_TICKS) { this.state.projectiles.delete(id); return; }
-
-      const dir = new Vector3(bolt.dx, bolt.dy, bolt.dz);
-      const segStart = new Vector3(bolt.ox, bolt.oy, bolt.oz)
-        .addScaledVector(dir, BOLT_SPEED * (age - 1) * TICK_DT);
-      const segLen = BOLT_SPEED * TICK_DT;
-
-      // segment-sphere intersection against every other player; nearest wins
-      let victim: string | null = null;
-      let hitDist = segLen;
-      this.state.players.forEach((p, sessionId) => {
-        if (sessionId === bolt.shooter) return;
-        const toCenter = new Vector3(p.x, p.y, p.z).sub(segStart);
-        let t: number;
-        if (toCenter.lengthSq() <= r2) {
-          t = 0; // segment starts inside the sphere: point-blank hit
-        } else {
-          const b = toCenter.dot(dir);            // projection onto the segment
-          if (b < 0) return;                      // sphere is behind this segment
-          const d2 = toCenter.lengthSq() - b * b; // perpendicular distance²
-          if (d2 > r2) return;                    // flight path passes wide
-          t = b - Math.sqrt(r2 - d2);             // nearest intersection
-          if (t > segLen) return;                 // not reached yet this tick
-        }
-        if (t < hitDist) { hitDist = t; victim = sessionId; }
-      });
-
-      if (victim) {
-        console.log(`[lobby] ${bolt.shooter} shot down ${victim}`);
-        this.state.projectiles.delete(id);
-        this.clients.find((c) => c.sessionId === victim)?.leave(4000);
-      }
     });
 
     // snapshot everyone's position for lag-compensated rewind. Slots recycle
@@ -359,11 +315,8 @@ export class LobbyRoom extends Room<LobbyState> {
     this.history[this.state.tick % HISTORY_TICKS] = { tick: this.state.tick, positions };
   }
 
-  // server-authoritative fire: aim is derived from the shooter's input
-  // stream, never from client-supplied geometry. `seq` names the last look
-  // batch the shooter had applied locally — folding up to it reproduces
-  // exactly the orientation that was in the middle of their screen. The bolt
-  // spawns into replicated state; collision happens per-tick in update().
+  // Instantaneous speed-of-light laser fire: aim is derived from the shooter's
+  // input stream. Ray-sphere hitscan is computed immediately on fire — zero delay.
   fire(client: Client, seq: number) {
     const now = Date.now();
     const last = this.lastFireTime.get(client.sessionId);
@@ -377,13 +330,46 @@ export class LobbyRoom extends Room<LobbyState> {
 
     const aim = new Quaternion(shooter.qx, shooter.qy, shooter.qz, shooter.qw);
     const dir = LOCAL_FORWARD.clone().applyQuaternion(aim).normalize();
+    const origin = new Vector3(shooter.x, shooter.y, shooter.z);
 
-    const bolt = new Projectile();
-    bolt.shooter = client.sessionId;
-    bolt.ox = shooter.x; bolt.oy = shooter.y; bolt.oz = shooter.z;
-    bolt.dx = dir.x; bolt.dy = dir.y; bolt.dz = dir.z;
-    bolt.spawnTick = this.state.tick;
-    this.state.projectiles.set(`bolt${this.boltCounter++}`, bolt);
+    // Instantaneous ray-sphere intersection against all other players
+    let hitDist = LASER_RANGE;
+    let victim: string | null = null;
+    const r2 = LASER_HIT_RADIUS * LASER_HIT_RADIUS;
+
+    this.state.players.forEach((target, targetId) => {
+      if (targetId === client.sessionId) return;
+      const toTarget = new Vector3(target.x, target.y, target.z).sub(origin);
+      const b = toTarget.dot(dir);
+      if (b <= 0) return; // behind shooter
+      if (b >= hitDist) return; // further than existing closer hit
+      const d2 = toTarget.lengthSq() - b * b;
+      if (d2 <= r2) {
+        const t = b - Math.sqrt(Math.max(0, r2 - d2));
+        if (t < hitDist) {
+          hitDist = Math.max(0, t);
+          victim = targetId;
+        }
+      }
+    });
+
+    if (victim) {
+      console.log(`[lobby] ${client.sessionId} instantly lasered ${victim} at ${hitDist.toFixed(1)}m`);
+      this.clients.find((c) => c.sessionId === victim)?.leave(4000);
+    }
+
+    // Broadcast instantaneous laser beam to all clients
+    this.broadcast('laser', {
+      shooter: client.sessionId,
+      ox: origin.x,
+      oy: origin.y,
+      oz: origin.z,
+      dx: dir.x,
+      dy: dir.y,
+      dz: dir.z,
+      dist: hitDist,
+      hit: Boolean(victim),
+    });
   }
 
   onJoin(client: Client, options: { name?: string }) {

@@ -8,7 +8,7 @@
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "url": "node lan-url.js",
-    "tunnel": "./bin/cloudflared tunnel --url http://localhost:${PORT:-2567}"
+    "tunnel": "node tunnel.js"
   },
   "license": "ISC",
   "type": "commonjs",
