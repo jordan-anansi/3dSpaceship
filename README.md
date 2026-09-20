@@ -2,6 +2,5 @@
 
 **Give the bots a try** — make a new directory, feed Gemini this repo's URL, and say _"clone this repo, install the dependencies, and start the server so I can play."_
 
-Doing it by hand: `npm install && npm run dev`, then open http://localhost:2567.
-
-`npm run help` prints the URLs other players can connect on.
+`npm run help` tells you how to start the app.
+For a first time, `npm install && npm run dev` (default local port http://localhost:2567).
