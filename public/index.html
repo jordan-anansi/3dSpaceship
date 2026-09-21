@@ -35,8 +35,16 @@
     li.dead { opacity: 0.4; text-decoration: line-through; }
     li .score { color: var(--dim); }
 
-    #game { width: 720px; height: 450px; display: block; border: 1px solid var(--line); }
+    #game { width: 720px; height: 450px; display: block; border: 1px solid var(--line);
+      background: #000; }
     #game-wrap { position: relative; width: 720px; }
+
+    /* Fullscreen (`f`). Only the wrapper and the canvas need sizing — every
+       overlay below is absolutely positioned against #game-wrap and anchored
+       to its edges, so they all follow for free. client.js listens for
+       fullscreenchange and re-syncs the renderer + camera aspect. */
+    #game-wrap:fullscreen { width: 100vw; height: 100vh; background: #000; }
+    #game-wrap:fullscreen #game { width: 100vw; height: 100vh; border: none; }
 
     /* reticle: thin crosshair with an open center, marking the exact ray the
        server fires along; pointer-events none so canvas clicks still lock */
@@ -53,6 +61,95 @@
     #reticle::after { top: 0; bottom: 0; left: 9px; width: 2px;
       -webkit-mask: linear-gradient(#000 35%, transparent 35% 65%, #000 65%);
       mask: linear-gradient(#000 35%, transparent 35% 65%, #000 65%); }
+
+    /* Target boxes: one screen-space rectangle per opponent, positioned per
+       frame from client.js. Deliberately NOT drawn in the scene — as DOM over
+       the canvas they can't be depth-tested against it, so the box stays
+       visible when the ship behind a rock isn't. overflow:hidden clips boxes
+       whose target has swung off the side of the frame. */
+    #target-boxes { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+    .target-box {
+      position: absolute; top: 0; left: 0; /* moved with transform, not offsets */
+      box-sizing: border-box;
+      border: 1px solid var(--bad);
+      /* a faint outer ring so the box reads against bright scenery (the sun,
+         the lit limb of the moon) as well as against black */
+      box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55), 0 0 6px rgba(255, 85, 102, 0.5);
+      will-change: transform, width, height;
+    }
+
+    /* Nametags: who each box belongs to, in screen space over the canvas for
+       the same reasons the boxes are (see above). Kept to the same red as the
+       box so a target reads as one object rather than two overlays. */
+    #nametags, #edge-arrows { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+    .nametag {
+      position: absolute; top: 0; left: 0;
+      font-size: 0.65rem; letter-spacing: 0.04em; white-space: nowrap;
+      color: #ffd7dc; text-shadow: 0 0 3px #000, 0 0 6px #000;
+      will-change: transform;
+    }
+
+    /* Off-screen enemy arrows: pinned to the edge of the frame, pointing at
+       someone close enough to matter who you currently can't see. The tip
+       rotates; the label deliberately does NOT, because a name rotated 140deg
+       is a name you can't read in the half-second you have to read it. */
+    .edge-arrow {
+      position: absolute; top: 0; left: 0;
+      display: flex; flex-direction: column; align-items: center; gap: 1px;
+      will-change: transform, opacity;
+    }
+    .edge-arrow .tip {
+      width: 0; height: 0;
+      border-left: 6px solid transparent; border-right: 6px solid transparent;
+      border-bottom: 11px solid var(--bad);
+      filter: drop-shadow(0 0 2px #000);
+    }
+    .edge-arrow .who {
+      font-size: 0.6rem; color: #ffd7dc; white-space: nowrap;
+      text-shadow: 0 0 3px #000, 0 0 5px #000;
+    }
+
+    /* Hitmarker: the classic four ticks, built from two masked bars crossed
+       at 45deg. It lives at the reticle because that's where your eyes
+       already are — a confirmation you have to look for isn't one. */
+    #hitmarker {
+      position: absolute; left: 50%; top: 50%; width: 26px; height: 26px;
+      transform: translate(-50%, -50%); pointer-events: none; opacity: 0;
+    }
+    #hitmarker::before, #hitmarker::after {
+      content: ''; position: absolute; left: 50%; top: 0; bottom: 0;
+      width: 2px; margin-left: -1px; background: #fff;
+      -webkit-mask: linear-gradient(#000 0 26%, transparent 26% 74%, #000 74% 100%);
+      mask: linear-gradient(#000 0 26%, transparent 26% 74%, #000 74% 100%);
+    }
+    #hitmarker::before { transform: rotate(45deg); }
+    #hitmarker::after { transform: rotate(-45deg); }
+    /* a kill is the same marker escalated, not a different one */
+    #hitmarker.kill::before, #hitmarker.kill::after { background: var(--bad); }
+    #hitmarker.show { animation: hitmark 240ms ease-out forwards; }
+    @keyframes hitmark {
+      from { opacity: 1; transform: translate(-50%, -50%) scale(0.7); }
+      to   { opacity: 0; transform: translate(-50%, -50%) scale(1.45); }
+    }
+
+    /* Killfeed: newest at the top, ageing out on their own. Top-LEFT because
+       the banner owns the centre and the scrap tag owns the right. */
+    #killfeed {
+      top: 8px; left: 8px; display: flex; flex-direction: column; gap: 2px;
+      max-width: 45%;
+    }
+    .kill-row {
+      background: rgba(11, 14, 26, 0.72); border-left: 2px solid var(--line);
+      padding: 1px 6px; font-size: 0.7rem; white-space: nowrap;
+      animation: feedIn 140ms ease-out;
+    }
+    .kill-row.mine { border-left-color: var(--go); }
+    .kill-row.mine .by { color: var(--go); }
+    .kill-row.victim-me { border-left-color: var(--bad); }
+    .kill-row.victim-me .victim { color: var(--bad); }
+    .kill-row .weapon { color: var(--dim); }
+    .kill-row.fading { opacity: 0; transition: opacity 400ms linear; }
+    @keyframes feedIn { from { opacity: 0; transform: translateX(-8px); } }
 
     /* Speed feedback. Both of these are meant to read as peripheral pressure
        rather than as a filter — if you notice them directly they're too
@@ -115,6 +212,14 @@
     #weapon-strip .w.active { color: var(--go); }
     #weapon-strip .w .key { opacity: 0.6; }
     #fuse-tag { color: var(--scrap); margin-top: 2px; }
+    /* The ram is the only weapon whose cooldown is long enough to plan
+       around, so it's the only one with a readout. Bar rather than a number:
+       you need "soon / not soon" at a glance, not a figure to read. */
+    #ram-tag { margin-top: 2px; color: var(--dim); }
+    #ram-bar { height: 3px; width: 110px; margin-left: auto; margin-top: 2px;
+      background: rgba(0, 0, 0, 0.55); border: 1px solid var(--line); }
+    #ram-fill { height: 100%; width: 0%; background: #7fd4ff; }
+    #ram-tag.ready { color: #7fd4ff; }
 
     #respawn-notice {
       top: 50%; left: 50%; transform: translate(-50%, -50%);
@@ -149,6 +254,33 @@
     #shop-scrap { font-size: 0.95rem; color: var(--scrap); }
     #ready-line { font-size: 0.75rem; color: var(--dim); }
 
+    /* Shop, two columns. LEFT is the draw: new technology, two cards, take
+       one. RIGHT is the standing menu of tier-ups, buyable as many times as
+       the scrap lasts — so "wider" stays a decision while "deeper" becomes
+       something you can just commit to. */
+    #shop-layout { display: flex; gap: 1rem; align-items: flex-start; justify-content: center; }
+    #shop-deal, #shop-menu { display: flex; flex-direction: column; gap: 0.35rem; }
+    #shop-menu { min-width: 260px; }
+    .shop-heading {
+      font-size: 0.62rem; letter-spacing: 0.12em; text-transform: uppercase;
+      color: var(--dim); text-align: left;
+    }
+    #upgrade-menu {
+      display: flex; flex-direction: column; gap: 3px;
+      max-height: 232px; overflow-y: auto; padding-right: 4px; text-align: left;
+    }
+    #upgrade-menu .empty { color: var(--dim); font-size: 0.72rem; padding: 0.3rem 0; }
+    .up-row {
+      display: grid; grid-template-columns: 1fr auto auto; gap: 0.5rem; align-items: center;
+      border: 1px solid var(--line); background: var(--panel); padding: 0.2rem 0.4rem;
+    }
+    .up-row.affordable { border-color: var(--go); }
+    .up-row .up-name { font-size: 0.75rem; overflow: hidden; text-overflow: ellipsis; }
+    .up-row .up-tier { color: var(--dim); font-size: 0.62rem; }
+    .up-row .up-cost { font-size: 0.72rem; color: var(--scrap); }
+    .up-row .up-cost.cant { color: var(--bad); }
+    .up-row button { font-size: 0.7rem; padding: 0.1rem 0.45rem; }
+
     table#scoreboard { border-collapse: collapse; font-size: 0.8rem; }
     table#scoreboard th { color: var(--dim); font-weight: normal; text-align: right; padding: 0.15rem 0.6rem; }
     table#scoreboard td { text-align: right; padding: 0.15rem 0.6rem; }
@@ -180,6 +312,10 @@
         <div id="vignette"></div>
         <div id="speedlines"></div>
         <div id="reticle"></div>
+        <div id="hitmarker" aria-hidden="true"></div>
+        <div id="target-boxes" aria-hidden="true"></div>
+        <div id="nametags" aria-hidden="true"></div>
+        <div id="edge-arrows" aria-hidden="true"></div>
         <svg id="juice" viewBox="0 0 132 132" aria-hidden="true"></svg>
 
         <div id="round-banner" class="hud-layer hidden">
@@ -188,6 +324,7 @@
           <span class="clock">1:30</span>
         </div>
         <div id="scrap-tag" class="hud-layer hidden">0 scrap</div>
+        <div id="killfeed" class="hud-layer hidden"></div>
 
         <div id="hull-wrap" class="hud-layer hidden">
           <div id="hull-label">hull 100/100</div>
@@ -197,6 +334,10 @@
         <div id="weapon-strip" class="hud-layer hidden">
           <div id="weapon-list"></div>
           <div id="fuse-tag" class="hidden">fuse 40 · wheel to adjust</div>
+          <div id="ram-tag" class="hidden">
+            <span id="ram-label">ram ready</span>
+            <div id="ram-bar"><div id="ram-fill"></div></div>
+          </div>
         </div>
 
         <div id="respawn-notice" class="hud-layer hidden">
@@ -217,8 +358,17 @@
           <!-- shop -->
           <div id="overlay-shop" class="hidden">
             <div id="shop-scrap">0 scrap</div>
-            <div id="cards"></div>
-            <button id="skip-btn">Skip &mdash; bank the scrap</button>
+            <div id="shop-layout">
+              <div id="shop-deal">
+                <div class="shop-heading">This round's draw &mdash; take one</div>
+                <div id="cards"></div>
+              </div>
+              <div id="shop-menu">
+                <div class="shop-heading">Tier-ups &mdash; buy as many as you can afford</div>
+                <div id="upgrade-menu"></div>
+              </div>
+            </div>
+            <button id="skip-btn">Done &mdash; bank the rest</button>
             <div id="ready-line"></div>
           </div>
 

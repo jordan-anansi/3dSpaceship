@@ -60,8 +60,11 @@ export class Player extends Schema {
   // part-way through regenerating. 0/0 until Juice Capacitor is bought.
   @type('number') juice: number = 0;
   @type('number') juiceMax: number = 0;
-  // active weapon id; always a weapon this player owns
-  @type('string') weapon: string = 'bolt';
+  // active weapon id; always a weapon this player owns. Duplicated from
+  // defaultWeapon in src/game/weapons/index.ts — this module is a leaf on
+  // purpose (catalog.ts imports it, and weapons/ imports catalog.ts), so
+  // importing the real constant here would close a require cycle.
+  @type('string') weapon: string = 'rail';
   // Fuse distance in units, set by the mouse wheel. Only weapons that
   // detonate at a chosen range read it (the flak launcher); everything else
   // ignores it. Replicated so the HUD can show what you've dialled in.
@@ -74,12 +77,30 @@ export class Player extends Schema {
   @type({ map: 'number' }) tech = new MapSchema<number>();
   // the two cards on offer this shop phase, and whether they've decided yet
   @type([Card]) offer = new ArraySchema<Card>();
+  // Every tier-up currently available to this player, refreshed after each
+  // purchase. The offer is the two DEALT cards — going wider, one decision,
+  // take it or leave it. This is the standing menu of depth, and unlike the
+  // offer it can be bought from as many times as the scrap lasts. Replicated
+  // as Cards so the client renders both through the same path.
+  @type([Card]) upgrades = new ArraySchema<Card>();
   @type('boolean') ready: boolean = false;
 
   // --- scoreboard, reset each round ---
   @type('number') kills: number = 0;
   @type('number') deaths: number = 0;
   @type('number') roundScrap: number = 0;
+  @type('number') damageDealt: number = 0;
+  // Trigger pulls that actually produced a shot, and how many of those shots
+  // touched something. Counted per SHOT, not per damage event — one flak
+  // shell catching three ships is one hit, or accuracy would read over 100%.
+  @type('number') shotsFired: number = 0;
+  @type('number') shotsHit: number = 0;
+
+  // Tick the battering ram comes off cooldown (0 = ready). The other weapons'
+  // cooldowns live in a server-side wall-clock map and are short enough to
+  // learn by feel; the ram's is five seconds, long enough that not showing it
+  // would just be withholding information the player needs to time a push.
+  @type('number') ramReadyTick: number = 0;
 }
 
 // A shot in flight. Only BIRTH state is replicated — every weapon's
@@ -114,6 +135,12 @@ export class Shot extends Schema {
 // server-side on the tick it spawned. Clients draw an expanding shell of
 // `radius` and drop it when the server deletes it.
 export class Blast extends Schema {
+  // 'burst' — ordnance going off, drawn at its true damage radius.
+  // 'death' — a ship coming apart. Carries no damage of its own; it rides in
+  //           this map purely so the death explosion inherits the existing
+  //           lifetime, replication and cleanup rather than needing a fourth
+  //           entity type. The client branches on this to draw debris.
+  @type('string') kind: string = 'burst';
   @type('number') x: number = 0;
   @type('number') y: number = 0;
   @type('number') z: number = 0;

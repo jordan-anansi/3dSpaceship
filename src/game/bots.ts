@@ -3,7 +3,7 @@ import { Quaternion, Vector3 } from 'three';
 import { Player } from './schema';
 import { applyStats } from './upgrades';
 import {
-  ASTEROID_FIELD, LOCAL_FORWARD, LOCAL_RIGHT, SPAWN_RADIUS, TICK_DT, asteroidCenter,
+  ASTEROID_FIELD, LOCAL_FORWARD, LOCAL_RIGHT, SPAWN_RADIUS, TICK_DT, asteroidCenters,
 } from './tuning';
 import { BOLT_SPEED } from './weapons';
 
@@ -128,6 +128,12 @@ export class Bots {
   // player who spends well should out-scale them, which is the reward for
   // shopping well.
   private equip(bot: Player, round: number) {
+    // Bots stay on the bolt even though players now START on the railgun.
+    // A travel-time projectile is dodgeable, which is the only thing making
+    // a perfect-aim opponent fair; hand that same aim a hitscan beam and
+    // there is no counterplay left, just damage on a timer. So this is an
+    // explicit assignment rather than the schema default.
+    bot.weapon = 'bolt';
     bot.tech.set('bolt', 1);
     bot.tech.set('plating', Math.min(4, Math.floor(round / 2)));
     bot.tech.set('overdrive', Math.min(4, Math.floor((round - 1) / 2)));
@@ -269,12 +275,21 @@ export class Bots {
    * pointed at its target while it slides around the obstacle.
    */
   private avoidance(here: Vector3, heading: Vector3, tick: number): Vector3 | null {
-    const tSec = tick * TICK_DT;
-    for (const rock of ASTEROID_FIELD) {
-      const c = asteroidCenter(rock, tSec);
-      const toRock = c.clone().sub(here);
+    const centers = asteroidCenters(tick * TICK_DT);
+    for (let i = 0; i < ASTEROID_FIELD.length; i++) {
+      const rock = ASTEROID_FIELD[i];
+      const toRock = new Vector3(
+        centers[i * 3] - here.x,
+        centers[i * 3 + 1] - here.y,
+        centers[i * 3 + 2] - here.z,
+      );
       const along = toRock.dot(heading);
-      if (along < 0 || along > AVOID_DIST) continue; // behind, or far enough off
+      // Lookahead scales with the rock. A fixed 55 units is a sensible margin
+      // around a 10-unit boulder and no margin at all around a 500-unit
+      // monolith — by the time its CENTRE is 55 units ahead you are already
+      // deep inside it, so bots would fly straight into the big ones.
+      const lookahead = AVOID_DIST + rock.r;
+      if (along < 0 || along > lookahead) continue; // behind, or far enough off
       const clearance = rock.r + AVOID_PAD;
       // perpendicular distance from the rock's centre to our flight line
       const perp = toRock.clone().addScaledVector(heading, -along);
@@ -285,7 +300,7 @@ export class Bots {
         ? perp.negate().normalize()
         : new Vector3().crossVectors(heading, LOCAL_RIGHT).normalize();
       // stronger the closer the rock is — a distant one barely bends us
-      return away.multiplyScalar(1.5 * (1 - along / AVOID_DIST) + 0.5);
+      return away.multiplyScalar(1.5 * (1 - along / lookahead) + 0.5);
     }
     return null;
   }

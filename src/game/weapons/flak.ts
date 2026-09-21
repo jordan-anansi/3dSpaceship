@@ -1,6 +1,6 @@
 import { Vector3 } from 'three';
 import { Player, Shot } from '../schema';
-import { TICK_DT } from '../tuning';
+import { SHIP_RADIUS, TICK_DT } from '../tuning';
 import { tierOf } from '../catalog';
 import type { CatalogEntry } from '../catalog';
 import type { StepContext, FireContext, WeaponDef } from './types';
@@ -16,13 +16,22 @@ import type { StepContext, FireContext, WeaponDef } from './types';
 // for any other weapon: the player judges the fuse off where they can SEE the
 // shell, so a client drawing it at a different speed would be aiming a
 // different gun from the one the server is simulating.
-export const FLAK_SPEED = 55;       // units/s — slower than the bolt's 80; it's placed, not aimed
+export const FLAK_SPEED = 110;      // units/s — slower than the bolt's 160; it's placed, not aimed
 
-// Backstop only. Max fuse (150) at 55 units/s is ~164 ticks, so the fuse
-// always fires first and a shell can never expire as a silent dud.
+// Backstop only. Max fuse (200) at 110 units/s is ~109 ticks, so the fuse
+// always fires first and a shell can never expire as a silent dud. The
+// margin got WIDER when speeds doubled — the shell reaches any given fuse
+// distance in half the ticks — so this stays where it is.
 const FLAK_LIFE_TICKS = 200;
-const FLAK_HIT_RADIUS = 1.3;        // ship bounding sphere padded by the shell's own body
-const FLAK_CORE_DAMAGE = 45;        // at the centre of the burst
+// ship bounding sphere padded by the shell's own body — derived so it tracks
+// SHIP_RADIUS rather than drifting away from it
+const FLAK_HIT_RADIUS = SHIP_RADIUS + 0.6;
+// At the centre of the burst — and above BASE_HULL on purpose, so a shell you
+// placed right is a kill rather than a setup. The falloff is what keeps this
+// from being a free win: the plateau is only 30% of the radius, and a ship
+// out at the rim still takes a third of this. Hull Plating remains the answer
+// — one tier (130) already survives a dead-centre burst.
+const FLAK_CORE_DAMAGE = 120;
 const FLAK_BASE_BLAST_RADIUS = 9;   // units — a ship is 1, so this is a real volume to place
 const FLAK_BLAST_RADIUS_PER_TIER = 2;
 // Damage at the rim, as a fraction of core. Falloff is what makes placement

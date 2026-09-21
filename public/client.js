@@ -3,6 +3,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import {
   SHOT_FX, createBlast, disposeBlast, disposeFx, updateBlast,
 } from './weapon-fx.js';
+import { initAudio, play as playSound, toggleMute } from './audio.js';
 
 // This client implements the 'mouse' control scheme, the only one the server
 // simulates. The older keyboard schemes ('flight', 'strafe') are archived in
@@ -39,11 +40,35 @@ const estimatedTick = () => tickBase.tick + (performance.now() - tickBase.at) / 
 // index in THIS list, not in the list of weapons you happen to own, so a gun
 // keeps the same key all run — muscle memory shouldn't shuffle when you buy
 // something.
+// Railgun is key 1 because it's the gun you start with (see
+// src/game/weapons/index.ts → defaultWeapon).
 const WEAPON_ORDER = [
-  { id: 'bolt', name: 'Bolt Cannon' },
   { id: 'rail', name: 'Railgun' },
+  { id: 'bolt', name: 'Bolt Cannon' },
   { id: 'flak', name: 'Flak Launcher' },
+  { id: 'ram', name: 'Battering Ram' },
 ];
+
+// Duplicated from RAM_COOLDOWN_MS in src/game/weapons/ram.ts. Only the HUD
+// bar reads it — the server owns the actual gate — so a drift here shows up
+// as a bar that finishes early or late, not as a desynced simulation.
+const RAM_COOLDOWN_SEC = 5;
+
+// The reference grid, so `g` can toggle it from the module-level key handler.
+// Null between sessions; startGame owns the lifetime.
+let activeGrid = null;
+
+function toggleFullscreen() {
+  const wrap = document.getElementById('game-wrap');
+  if (!wrap) return;
+  // the WRAPPER, not the canvas — the vignette, speedlines, reticle and HUD
+  // are siblings of the canvas, and fullscreening the canvas alone would drop
+  // every one of them
+  const request = document.fullscreenElement
+    ? document.exitFullscreen()
+    : wrap.requestFullscreen();
+  request?.catch((err) => console.warn('fullscreen toggle failed:', err));
+}
 
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -51,6 +76,10 @@ form.addEventListener('submit', async (event) => {
   if (!name) return;
 
   status.textContent = 'connecting...';
+  // A submit IS the user gesture an AudioContext needs, and it's the last one
+  // guaranteed to happen before the shooting starts — after this the pointer
+  // is locked and there may never be another ordinary click.
+  initAudio();
   try {
     const room = await client.joinOrCreate('lobby', { name });
     form.classList.add('hidden');
@@ -72,13 +101,58 @@ const sendInput = () => currentRoom?.send('input', {
   moveX: axis('d', 'a'), // lateral strafe — inert until Lateral Thrusters
 });
 
+// --- the trigger ----------------------------------------------------------
+// Two inputs pull it (left mouse and space) and either may be held, so the
+// held state is a SET of which ones are down rather than a boolean: letting
+// go of space while still holding the mouse must not stop the gun.
+//
+// Repeats are sent faster than any weapon's cooldown and the server drops the
+// extras. That's deliberate — the alternative is teaching the client every
+// weapon's cadence, which is a second source of truth that goes stale the
+// first time a cooldown upgrade lands.
+const TRIGGER_REPEAT_MS = 60;
+const triggersDown = new Set();
+let triggerTimer = null;
+
+const sendFire = () => currentRoom?.send('fire', {
+  // seq lets the server aim with exactly the orientation we predicted;
+  // tick names the world we were looking at, for lag-compensated weapons
+  seq: lookSeq,
+  tick: Math.round(estimatedTick()),
+});
+
+function pullTrigger(source) {
+  if (triggersDown.has(source)) return;
+  const wasIdle = triggersDown.size === 0;
+  triggersDown.add(source);
+  if (!wasIdle) return;
+  sendFire();
+  triggerTimer = setInterval(() => {
+    if (!currentRoom || triggersDown.size === 0) { releaseTrigger(); return; }
+    sendFire();
+  }, TRIGGER_REPEAT_MS);
+}
+
+function releaseTrigger(source) {
+  if (source === undefined) triggersDown.clear();
+  else triggersDown.delete(source);
+  if (triggersDown.size > 0) return;
+  clearInterval(triggerTimer);
+  triggerTimer = null;
+}
+
+// Losing the pointer (esc, alt-tab, the shop overlay appearing) has to drop
+// the trigger too, or the gun keeps firing at nothing until the next click.
+document.addEventListener('pointerlockchange', () => {
+  if (document.pointerLockElement !== gameCanvas) releaseTrigger();
+});
+window.addEventListener('blur', () => { releaseTrigger(); held.clear(); sendInput(); });
+
 window.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT') return; // typing in a form, not flying
   if (e.key === ' ') {
     e.preventDefault(); // don't scroll the page or "click" a focused button
-    // seq lets the server aim with exactly the orientation we predicted;
-    // tick names the world we were looking at, for lag-compensated weapons
-    if (!e.repeat) currentRoom?.send('fire', { seq: lookSeq, tick: Math.round(estimatedTick()) });
+    if (!e.repeat) pullTrigger('key');
     return;
   }
   if (e.key === 'Shift') {
@@ -96,9 +170,17 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   const key = e.key.toLowerCase();
+  // view toggles: local-only, nothing to tell the server about
+  if (key === 'f') { toggleFullscreen(); return; }
+  if (key === 'm') { toggleMute(); return; }
+  if (key === 'g') {
+    if (activeGrid) activeGrid.visible = !activeGrid.visible;
+    return;
+  }
   if (TRACKED.has(key) && !held.has(key)) { held.add(key); sendInput(); }
 });
 window.addEventListener('keyup', (e) => {
+  if (e.key === ' ') { releaseTrigger('key'); return; }
   const key = e.key.toLowerCase();
   if (TRACKED.has(key)) { held.delete(key); sendInput(); }
 });
@@ -151,11 +233,22 @@ function applyLookBatch(q, batch) {
 }
 
 const gameCanvas = document.getElementById('game');
-gameCanvas.addEventListener('click', () => {
-  // only grab the pointer when there's actually flying to do — during the
-  // shop the overlay needs real clicks
-  if (currentRoom && !overlayVisible) gameCanvas.requestPointerLock();
+// Left click both captures the pointer and, once captured, fires. The two
+// have to be the same button and they can't both happen on one press: the
+// click that grabs the mouse is the player saying "let me in", not "shoot" —
+// firing on it would put a shot downrange before they'd even seen the frame.
+gameCanvas.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  // during the shop the overlay needs real clicks, so there's nothing to grab
+  if (!currentRoom || overlayVisible) return;
+  if (document.pointerLockElement !== gameCanvas) {
+    gameCanvas.requestPointerLock();
+    return;
+  }
+  e.preventDefault();
+  pullTrigger('mouse');
 });
+window.addEventListener('mouseup', (e) => { if (e.button === 0) releaseTrigger('mouse'); });
 let lookDX = 0, lookDY = 0;
 window.addEventListener('mousemove', (e) => {
   if (document.pointerLockElement === gameCanvas) {
@@ -324,8 +417,11 @@ const vignetteEl = document.getElementById('vignette');
 const speedlinesEl = document.getElementById('speedlines');
 const BASE_FOV = 70;
 const FOV_GAIN = 6;        // degrees of extra FOV at full speed
-const SPEED_FX_LO = 10;    // units/s where the speed cue starts appearing
-const SPEED_FX_HI = 55;    // ...and where it's fully applied
+// Doubled with MAX_WISH in src/game/tuning.ts. These are absolute speeds, so
+// at the old values the FOV kick and vignette would sit pinned at full the
+// moment you touched W — the cue stops being a cue when it's always on.
+const SPEED_FX_LO = 20;    // units/s where the speed cue starts appearing
+const SPEED_FX_HI = 110;   // ...and where it's fully applied
 const VIGNETTE_MAX = 0.3;
 const DASH_FX_TIME = 0.5;  // seconds for the dash flash to fade out
 const DASH_CONTRAST = 0.07;
@@ -339,7 +435,7 @@ let lastJuice = null; // previous frame's juice, for spend detection
 // than firing on keypress, which would flash even when we're out of juice.
 // Respawn refills rather than drains, so it can't false-positive.
 function noteJuice(juice) {
-  if (lastJuice !== null && juice < lastJuice - 0.5) dashFx = 1;
+  if (lastJuice !== null && juice < lastJuice - 0.5) { dashFx = 1; playSound('dash'); }
   lastJuice = juice;
 }
 
@@ -416,21 +512,41 @@ function makeJupiterTexture(w = 512, h = 256) {
 //
 // The GLB (converted from orion/nave_orion.obj) is authored at ~277 units
 // long with the nose toward +Z; the inner group normalizes it to our game
-// units — centered, ~2.4 long, nose along -Z — so the OUTER group can wear
-// the replicated quaternion/position directly.
+// units — centered, SHIP_LENGTH long, nose along -Z — so the OUTER group can
+// wear the replicated quaternion/position directly.
+//
+// SHIP_LENGTH must track SHIP_RADIUS in src/game/tuning.ts: the hitbox is a
+// 2.2-unit sphere, and a 2.4-long hull inside it means half the shots that
+// register land visibly off the model. Drawing the ship at the size it is
+// actually hit at is also most of "make ships more visible" — at 2.4 units
+// in a 2,700-unit arena an enemy is a speck almost everywhere.
+const SHIP_LENGTH = 4.4;
 const shipTemplatePromise = new GLTFLoader().loadAsync('/models/orion.glb')
   .then((gltf) => {
     const model = gltf.scene;
-    // no backface culling: parts of the hull are modeled single-sided and
-    // vanish from some viewing angles with culling on
-    model.traverse((o) => { if (o.isMesh) o.material.side = THREE.DoubleSide; });
+    model.traverse((o) => {
+      if (!o.isMesh) return;
+      // no backface culling: parts of the hull are modeled single-sided and
+      // vanish from some viewing angles with culling on
+      o.material.side = THREE.DoubleSide;
+      // Space has no sky bounce, so the ambient term is almost nothing (0.023
+      // — see the lighting block in startGame) and an unlit hull goes to
+      // literal black. A ship silhouetted against empty sky then disappears
+      // entirely. A small cool emissive floor is the cheapest fix that
+      // doesn't touch the key-to-fill ratio the lighting was tuned around:
+      // it lifts the darkest parts off zero and leaves the lit side alone.
+      if (o.material.emissive) {
+        o.material.emissive = new THREE.Color(0x2a4066);
+        o.material.emissiveIntensity = 1;
+      }
+    });
     const box = new THREE.Box3().setFromObject(model);
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
     model.position.copy(center).multiplyScalar(-1);
     const norm = new THREE.Group();
     norm.rotation.y = Math.PI;
-    norm.scale.setScalar(2.4 / size.z);
+    norm.scale.setScalar(SHIP_LENGTH / size.z);
     norm.add(model);
     const template = new THREE.Group();
     template.add(norm);
@@ -480,25 +596,92 @@ const asteroidTemplatePromise = new GLTFLoader().loadAsync('/models/asteroid.glb
     return null;
   });
 
-// Hardcoded so every client sees the identical rocks. r = approximate radius
-// in units. DUPLICATED in src/game/tuning.ts, which collides ships against
-// these same spheres — the two lists MUST stay in step or the server will
-// stop you against a rock you can't see.
-const ASTEROID_FIELD = [
-  { p: [-40, 10, -80], r: 12, seed: 1 },
-  { p: [25, -15, -50], r: 7, seed: 2 },
-  { p: [-70, -20, 40], r: 16, seed: 3 },
-  { p: [80, 30, 60], r: 9, seed: 4 },
-  { p: [0, 42, -120], r: 14, seed: 5 },
-  { p: [45, -35, -20], r: 6, seed: 6 },
-];
+// Every client generates the identical rocks by running the identical LCG
+// from the identical seed. DUPLICATED in src/game/tuning.ts, which collides
+// ships and shots against these same spheres — the two generators MUST stay
+// in step or the server will stop you against a rock you can't see.
+//
+// The multiply stays exact in a double: s < 2^32 and 1664525 < 2^21, so the
+// product is under 2^53. That exactness is what makes both sides agree.
+function generateAsteroidField(count = 100) {
+  let s = 987654321;
+  const rnd = () => {
+    s = (s * 1664525 + 1013904223) % 4294967296;
+    return s / 4294967296;
+  };
 
-function makeAsteroid(template, { p, r, seed }) {
+  const field = [];
+  for (let i = 0; i < count; i++) {
+    // Power-law radii: many 5-40u boulders, dozens of mid rocks, a few
+    // 200-500u monoliths. Cubing the uniform is what keeps giants rare.
+    const r = 5 + Math.pow(rnd(), 3.5) * 495;
+
+    // A belt around the arena, with bigger rocks pushed further out so a
+    // monolith can never engulf the spawn sphere (SPAWN_RADIUS = 60, and the
+    // nearest possible rock surface sits at 120 + 1.6r - r > 120).
+    const angle = rnd() * Math.PI * 2;
+    const dist = 120 + r * 1.6 + rnd() * 2600;
+    const height = (rnd() - 0.5) * (500 + r * 0.8);
+    const p0 = [Math.cos(angle) * dist, height, Math.sin(angle) * dist];
+
+    // Mass stands in for inertia: the bigger the rock, the slower it drifts
+    // and the lazier it tumbles.
+    const speedFactor = Math.max(0.18, 1 - r / 520);
+    const driftAmp = [
+      (6 + rnd() * 18) * (0.6 + 0.4 * speedFactor),
+      (4 + rnd() * 14) * (0.6 + 0.4 * speedFactor),
+      (6 + rnd() * 18) * (0.6 + 0.4 * speedFactor),
+    ];
+    const driftFreq = [
+      (0.015 + rnd() * 0.03) * speedFactor,
+      (0.012 + rnd() * 0.025) * speedFactor,
+      (0.015 + rnd() * 0.03) * speedFactor,
+    ];
+    const driftPhase = [rnd() * Math.PI * 2, rnd() * Math.PI * 2, rnd() * Math.PI * 2];
+    const rot0 = [rnd() * Math.PI * 2, rnd() * Math.PI * 2, rnd() * Math.PI * 2];
+    const maxRot = 0.03 + 0.18 * speedFactor;
+    const rotV = [
+      (rnd() - 0.5) * maxRot,
+      (rnd() - 0.5) * maxRot,
+      (rnd() - 0.5) * maxRot,
+    ];
+
+    field.push({ p0, r, driftAmp, driftFreq, driftPhase, rot0, rotV, seed: i + 1 });
+  }
+  return field;
+}
+
+// Engine glow. At a ~2.7:1 key-to-fill ratio a hull's unlit side is nearly
+// black, so from most angles the only thing separating an enemy from the
+// starfield is a sliver of lit edge. An additive sprite on the tail is light
+// the ship EMITS: it survives being in shadow, it reads from any angle, and
+// it costs one quad. The material is shared across every ship — they all
+// have the same engines — so this allocates once and clones cheaply.
+let engineGlowMaterial = null;
+function makeEngineGlow() {
+  if (!engineGlowMaterial) {
+    engineGlowMaterial = new THREE.SpriteMaterial({
+      map: makeStarTexture(), // the same soft radial falloff the stars use
+      color: 0x74d2ff,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+  }
+  const sprite = new THREE.Sprite(engineGlowMaterial);
+  sprite.scale.setScalar(SHIP_LENGTH * 0.8);
+  sprite.position.z = SHIP_LENGTH * 0.42; // the tail — the nose is -Z
+  return sprite;
+}
+
+const ASTEROID_FIELD = generateAsteroidField(100);
+
+function makeAsteroid(template, { p0, r, rot0, seed }) {
   if (template) {
     const mesh = template.clone(true); // shares geometry/material
     mesh.scale.setScalar(r);
-    mesh.position.set(p[0], p[1], p[2]);
-    mesh.rotation.set(seed * 1.3, seed * 2.1, seed * 0.7); // varied resting pose
+    mesh.position.set(p0[0], p0[1], p0[2]);
+    mesh.rotation.set(rot0[0], rot0[1], rot0[2]);
     return mesh;
   }
   // procedural fallback rock
@@ -521,41 +704,231 @@ function makeAsteroid(template, { p, r, seed }) {
     geometry,
     new THREE.MeshStandardMaterial({ color: 0x8a7a68, roughness: 0.95, flatShading: true })
   );
-  mesh.position.set(p[0], p[1], p[2]);
-  mesh.rotation.set(seed * 1.3, seed * 2.1, seed * 0.7); // varied resting pose
+  mesh.position.set(p0[0], p0[1], p0[2]);
+  mesh.rotation.set(rot0[0], rot0[1], rot0[2]);
   return mesh;
 }
 
-function makePlanet() {
-  const planet = new THREE.Mesh(
-    new THREE.SphereGeometry(50, 48, 32),
-    new THREE.MeshBasicMaterial({ map: makeJupiterTexture() })
-  );
-  planet.position.set(60, 25, -160); // off to the side so nobody spawns inside it
-  return planet;
+// ---------------------------------------------------------------------------
+// The sky. Everything below is drawn at astronomical distance and never
+// collides with anything — it exists to give the arena a legible up, a
+// direction for the light to come from, and a sense of being somewhere.
+//
+// Two of these bodies TRACK THE CAMERA (see the render loop): the sun and the
+// star sphere are redrawn centred on the player every frame, so they hold
+// constant angular size and never parallax. That's what makes them read as
+// infinitely far away instead of as very large nearby props you can outrun.
+// The moon deliberately does NOT track — at 5,500 km it barely shifts at ship
+// speeds, and the shift it does have is the only cue that you moved at all.
+//
+// Distances are in metres so the numbers stay recognisable; the arena's
+// "units" are the same thing at a different scale, which is why the far plane
+// has to go to 25,000 km and the depth buffer has to go logarithmic.
+// ---------------------------------------------------------------------------
+
+// Where the light comes from. Fixed in world space, so shadows and the lit
+// limb of the moon agree with where the sun is actually drawn.
+const SUN_DIR = new THREE.Vector3(0.6, 0.45, -0.65).normalize();
+const SUN_DISTANCE = 14000000;    // 14,000 km
+const SUN_CORE_RADIUS = 500000;   // 500 km
+const SUN_CORONA_RADIUS = 680000; // 680 km
+
+function makeSun() {
+  const group = new THREE.Group();
+  // unlit core: it IS the light source, so shading it would be backwards
+  group.add(new THREE.Mesh(
+    new THREE.SphereGeometry(SUN_CORE_RADIUS, 32, 32),
+    new THREE.MeshBasicMaterial({ color: 0xfff6e8 })
+  ));
+  // corona, drawn back-faces-only so the core shows through the middle of it
+  group.add(new THREE.Mesh(
+    new THREE.SphereGeometry(SUN_CORONA_RADIUS, 32, 32),
+    new THREE.MeshBasicMaterial({
+      color: 0xffba55, transparent: true, opacity: 0.38, side: THREE.BackSide,
+    })
+  ));
+  return group;
 }
 
-// random points filling a spherical shell around the origin, so there's
-// always something nearby drifting past to make our own motion visible
-function makeStarfield(count = 2000, rMin = 20, rMax = 160) {
+const MOON_RADIUS = 1737400;   // 1,737.4 km — the actual Moon
+const MOON_DISTANCE = 5500000; // 5,500 km
+const MOON_DIR = new THREE.Vector3(0.35, 0.18, -0.91).normalize();
+
+// Shared by both atmosphere shells. The logdepthbuf chunks are NOT optional:
+// the renderer runs with logarithmicDepthBuffer on, and a custom shader that
+// doesn't opt in writes linear depth into a logarithmic buffer — the shells
+// then z-fight with the planet surface they're supposed to wrap.
+const ATMOSPHERE_VERT = `
+  varying vec3 vWorldPosition;
+  #include <common>
+  #include <logdepthbuf_pars_vertex>
+  void main() {
+    vec4 worldPos = modelMatrix * vec4(position, 1.0);
+    vWorldPosition = worldPos.xyz;
+    gl_Position = projectionMatrix * viewMatrix * worldPos;
+    #include <logdepthbuf_vertex>
+  }
+`;
+
+function makePlanet() {
+  const group = new THREE.Group();
+  const planetCenter = MOON_DIR.clone().multiplyScalar(MOON_DISTANCE);
+
+  group.add(new THREE.Mesh(
+    new THREE.SphereGeometry(MOON_RADIUS, 64, 48),
+    new THREE.MeshStandardMaterial({
+      map: makeJupiterTexture(), roughness: 0.88, metalness: 0.05,
+    })
+  ));
+
+  // Inner haze: a Fresnel rim ON the planet's own surface, brightest where
+  // we're looking along the limb and dimmest dead centre.
+  group.add(new THREE.Mesh(
+    new THREE.SphereGeometry(MOON_RADIUS * 1.012, 64, 48),
+    new THREE.ShaderMaterial({
+      uniforms: {
+        uColor: { value: new THREE.Color(0xffcb78) },
+        uSunDir: { value: SUN_DIR },
+        uPlanetCenter: { value: planetCenter },
+      },
+      vertexShader: ATMOSPHERE_VERT,
+      fragmentShader: `
+        uniform vec3 uColor;
+        uniform vec3 uSunDir;
+        uniform vec3 uPlanetCenter;
+        varying vec3 vWorldPosition;
+        #include <common>
+        #include <logdepthbuf_pars_fragment>
+        void main() {
+          #include <logdepthbuf_fragment>
+          vec3 worldNormal = normalize(vWorldPosition - uPlanetCenter);
+          vec3 viewDir = normalize(cameraPosition - vWorldPosition);
+          float rim = pow(1.0 - max(0.0, dot(viewDir, worldNormal)), 2.8);
+          // the terminator is soft, not a hard line: remap dot from [-0.25,1]
+          // so twilight has somewhere to live
+          float sunFactor = clamp((dot(worldNormal, uSunDir) + 0.25) / 1.25, 0.0, 1.0);
+          vec3 atmoColor = mix(vec3(0.68, 0.36, 0.16), uColor, 0.3 + 0.7 * sunFactor);
+          gl_FragColor = vec4(atmoColor, rim * (0.2 + 0.8 * sunFactor) * 0.85);
+        }
+      `,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
+  ));
+
+  // Outer halo: a back-faces-only shell so the glow extends into empty space
+  // AROUND the silhouette rather than sitting on the disc.
+  group.add(new THREE.Mesh(
+    new THREE.SphereGeometry(MOON_RADIUS * 1.045, 64, 48),
+    new THREE.ShaderMaterial({
+      uniforms: {
+        uColor: { value: new THREE.Color(0xffad54) },
+        uSunDir: { value: SUN_DIR },
+        uPlanetCenter: { value: planetCenter },
+      },
+      vertexShader: ATMOSPHERE_VERT,
+      fragmentShader: `
+        uniform vec3 uColor;
+        uniform vec3 uSunDir;
+        uniform vec3 uPlanetCenter;
+        varying vec3 vWorldPosition;
+        #include <common>
+        #include <logdepthbuf_pars_fragment>
+        void main() {
+          #include <logdepthbuf_fragment>
+          vec3 worldNormal = normalize(vWorldPosition - uPlanetCenter);
+          vec3 viewDir = normalize(cameraPosition - vWorldPosition);
+          // Path-length normalisation. dot(-viewDir, normal) runs 0 at the
+          // outer shell's edge up to sqrt(1 - (Rp/Ro)^2) = 0.2908 at the
+          // planet's silhouette limb; dividing by that maps the shell's full
+          // thickness to [0,1] so the halo peaks exactly at the limb.
+          float rim = clamp(dot(-viewDir, worldNormal) / 0.2908, 0.0, 1.0);
+          float sunFactor = clamp((dot(worldNormal, uSunDir) + 0.25) / 1.25, 0.0, 1.0);
+          vec3 atmoColor = mix(vec3(0.62, 0.32, 0.14), uColor, 0.35 + 0.65 * sunFactor);
+          gl_FragColor = vec4(atmoColor, pow(rim, 2.0) * (0.2 + 0.8 * sunFactor) * 0.9);
+        }
+      `,
+      side: THREE.BackSide,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
+  ));
+
+  group.position.copy(planetCenter);
+  return group;
+}
+
+// A soft round falloff, so a star is a point of light rather than a square.
+function makeStarTexture() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 16;
+  canvas.height = 16;
+  const ctx = canvas.getContext('2d');
+  const gradient = ctx.createRadialGradient(8, 8, 0, 8, 8, 8);
+  gradient.addColorStop(0, 'rgba(255, 255, 255, 1)');
+  gradient.addColorStop(0.25, 'rgba(255, 255, 255, 0.9)');
+  gradient.addColorStop(0.6, 'rgba(220, 235, 255, 0.35)');
+  gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, 16, 16);
+  return new THREE.CanvasTexture(canvas);
+}
+
+// Stars on the celestial sphere, behind every other body. sizeAttenuation is
+// OFF on purpose: these are 16,000 km out, so perspective scaling would
+// shrink them to nothing — a fixed pixel size is both correct and cheaper.
+// These are pure BACKDROP: they ride the camera, so they contribute no
+// parallax and therefore no sense of speed. That job belongs to the grid and
+// the rocks — see the grid in startGame.
+function makeDistantStars(count = 3500, radius = 16000000) {
   const positions = new Float32Array(count * 3);
+  const colors = new Float32Array(count * 3);
+
+  // a rough main sequence — enough spread that the field doesn't read as one
+  // flat grey wash
+  const starColors = [
+    new THREE.Color(1.0, 1.0, 1.0),   // white
+    new THREE.Color(0.85, 0.93, 1.0), // blue-white
+    new THREE.Color(0.72, 0.85, 1.0), // azure
+    new THREE.Color(1.0, 0.95, 0.82), // warm yellow
+    new THREE.Color(1.0, 0.80, 0.65), // amber giant
+  ];
+
   for (let i = 0; i < count; i++) {
     // uniform random direction on the sphere
     const u = Math.random() * 2 - 1;
     const theta = Math.random() * 2 * Math.PI;
-    const s = Math.sqrt(1 - u * u);
-    // cube-root keeps density uniform through the shell's volume
-    const r = Math.cbrt(rMin ** 3 + Math.random() * (rMax ** 3 - rMin ** 3));
+    const s = Math.sqrt(Math.max(0, 1 - u * u));
+    const r = radius + (Math.random() - 0.5) * 60;
+
     positions[i * 3] = r * s * Math.cos(theta);
     positions[i * 3 + 1] = r * u;
     positions[i * 3 + 2] = r * s * Math.sin(theta);
+
+    // squared so most stars are dim and a few are bright, which is what makes
+    // constellations resolve out of the noise
+    const base = starColors[Math.floor(Math.random() * starColors.length)];
+    const lum = 0.45 + 0.55 * Math.random() ** 2;
+    colors[i * 3] = base.r * lum;
+    colors[i * 3 + 1] = base.g * lum;
+    colors[i * 3 + 2] = base.b * lum;
   }
+
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  // sizeAttenuation shrinks distant points — the resulting parallax is
-  // what actually sells the sense of speed
-  const material = new THREE.PointsMaterial({ color: 0x9fb4ff, size: 0.4, sizeAttenuation: true });
-  return new THREE.Points(geometry, material);
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+  return new THREE.Points(geometry, new THREE.PointsMaterial({
+    size: 3.5,
+    map: makeStarTexture(),
+    vertexColors: true,
+    sizeAttenuation: false,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -593,7 +966,71 @@ const ui = {
   respawnSub: document.querySelector('#respawn-notice .sub'),
   hint: document.getElementById('controls-hint'),
   hud: document.getElementById('hud'),
+  targetBoxes: document.getElementById('target-boxes'),
+  nametags: document.getElementById('nametags'),
+  edgeArrows: document.getElementById('edge-arrows'),
+  hitmarker: document.getElementById('hitmarker'),
+  killfeed: document.getElementById('killfeed'),
+  upgradeMenu: document.getElementById('upgrade-menu'),
+  ramTag: document.getElementById('ram-tag'),
+  ramLabel: document.getElementById('ram-label'),
+  ramFill: document.getElementById('ram-fill'),
 };
+
+// --- hit confirmation -----------------------------------------------------
+// The one piece of feedback the server has to tell us about: a shot's
+// outcome is resolved entirely server-side (lag compensation means the world
+// it resolved against isn't even the one we drew), so there is nothing the
+// client could infer this from on its own.
+function flashHitmarker(killed) {
+  const el = ui.hitmarker;
+  // Restarting a CSS animation needs the class off, a forced reflow, and the
+  // class back on. Without the reflow the browser coalesces both style
+  // changes into one and the animation never retriggers — which means every
+  // hit after the first shows nothing, exactly when it matters most.
+  el.classList.remove('show');
+  el.classList.toggle('kill', !!killed);
+  void el.offsetWidth;
+  el.classList.add('show');
+}
+
+// --- killfeed -------------------------------------------------------------
+// Rows age out on a timer rather than being capped alone: a cap keeps the
+// list short but leaves the last few kills on screen forever in a quiet
+// stretch, which makes stale information look current.
+const KILLFEED_LIFE_MS = 6000;
+const KILLFEED_FADE_MS = 400;
+const KILLFEED_MAX = 5;
+
+function pushKillfeed(event, myId) {
+  const row = document.createElement('div');
+  row.className = 'kill-row';
+  if (event.byId === myId) row.classList.add('mine');
+  if (event.victimId === myId) row.classList.add('victim-me');
+
+  const by = document.createElement('span');
+  by.className = 'by';
+  // A ship can die with nobody credited — an instant-kill dome whose owner
+  // left, say — and "  destroyed X" reads as a rendering bug.
+  by.textContent = event.by || 'something';
+
+  const weapon = document.createElement('span');
+  weapon.className = 'weapon';
+  weapon.textContent = event.weapon ? ` — ${event.weapon} → ` : ' destroyed ';
+
+  const victim = document.createElement('span');
+  victim.className = 'victim';
+  victim.textContent = event.victim;
+
+  row.append(by, weapon, victim);
+  ui.killfeed.prepend(row);
+  while (ui.killfeed.children.length > KILLFEED_MAX) ui.killfeed.lastChild.remove();
+
+  setTimeout(() => {
+    row.classList.add('fading');
+    setTimeout(() => row.remove(), KILLFEED_FADE_MS);
+  }, KILLFEED_LIFE_MS);
+}
 
 // Gate for the canvas click handler: while any overlay is up, clicks belong
 // to the UI, not to pointer lock.
@@ -643,18 +1080,85 @@ function renderCards(me) {
     const button = document.createElement('button');
     button.textContent = affordable ? 'Buy' : 'Too expensive';
     button.disabled = !affordable || me.ready;
-    button.addEventListener('click', () => currentRoom?.send('buy', { id: card.id }));
+    button.addEventListener('click', () => {
+      currentRoom?.send('buy', { id: card.id });
+      playSound('buy');
+    });
 
     el.append(kind, name, blurb, cost, button);
     ui.cards.appendChild(el);
   });
 }
 
+// The right-hand column: every tier-up currently available, buyable as many
+// times as the scrap lasts. Diffed against a signature for the same reason
+// the cards are — this rebuilds at the UI tick rate otherwise, and a row
+// that gets replaced mid-click never fires its handler.
+//
+// Costs come off the replicated card, which the server reprices after every
+// purchase, so buying tier 2 immediately shows tier 3 at its higher price.
+let upgradeSignature = '';
+function renderUpgradeMenu(me) {
+  const signature = `${me.scrap | 0}|${me.ready}|` +
+    me.upgrades.map((c) => `${c.id}:${c.tier}:${c.cost}`).join(',');
+  if (signature === upgradeSignature) return;
+  upgradeSignature = signature;
+
+  ui.upgradeMenu.replaceChildren();
+  if (me.upgrades.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'Nothing to tier up yet — take a technology first.';
+    ui.upgradeMenu.appendChild(empty);
+    return;
+  }
+
+  me.upgrades.forEach((card) => {
+    const affordable = me.scrap >= card.cost;
+    const row = document.createElement('div');
+    row.className = `up-row${affordable ? ' affordable' : ''}`;
+
+    const label = document.createElement('div');
+    const name = document.createElement('div');
+    name.className = 'up-name';
+    name.textContent = card.name;
+    const tier = document.createElement('div');
+    tier.className = 'up-tier';
+    tier.textContent = `tier ${card.tier} of ${card.maxTier}`;
+    label.append(name, tier);
+    label.title = card.blurb; // the full text, without a row tall enough for it
+
+    const cost = document.createElement('div');
+    cost.className = `up-cost${affordable ? '' : ' cant'}`;
+    cost.textContent = String(card.cost);
+
+    const button = document.createElement('button');
+    button.textContent = 'Buy';
+    button.disabled = !affordable || me.ready;
+    button.addEventListener('click', () => {
+      currentRoom?.send('buy', { id: card.id });
+      playSound('buy');
+    });
+
+    row.append(label, cost, button);
+    ui.upgradeMenu.appendChild(row);
+  });
+}
+
+// Accuracy is only meaningful once you've actually pulled the trigger; a
+// player who spent the round running shows a dash rather than a proud 0%.
+const accuracyOf = (p) =>
+  (p.shotsFired > 0 ? `${Math.round((100 * p.shotsHit) / p.shotsFired)}%` : '—');
+
 function renderScoreboard(players, myId) {
   const rows = [...players.entries()].sort((a, b) => b[1].kills - a[1].kills);
   ui.scoreboard.replaceChildren();
   const head = document.createElement('tr');
-  for (const [label, cls] of [['ship', 'who'], ['kills', ''], ['deaths', ''], ['scrap earned', '']]) {
+  const columns = [
+    ['ship', 'who'], ['kills', ''], ['deaths', ''],
+    ['damage', ''], ['accuracy', ''], ['scrap earned', ''],
+  ];
+  for (const [label, cls] of columns) {
     const th = document.createElement('th');
     th.textContent = label;
     if (cls) th.className = cls;
@@ -664,7 +1168,11 @@ function renderScoreboard(players, myId) {
   for (const [id, p] of rows) {
     const tr = document.createElement('tr');
     tr.className = id === myId ? 'me' : (p.isBot ? 'bot' : '');
-    for (const [text, cls] of [[p.name, 'who'], [p.kills, ''], [p.deaths, ''], [Math.floor(p.roundScrap), '']]) {
+    const cells = [
+      [p.name, 'who'], [p.kills, ''], [p.deaths, ''],
+      [Math.round(p.damageDealt), ''], [accuracyOf(p), ''], [Math.floor(p.roundScrap), ''],
+    ];
+    for (const [text, cls] of cells) {
       const td = document.createElement('td');
       td.textContent = String(text);
       if (cls) td.className = cls;
@@ -677,8 +1185,9 @@ function renderScoreboard(players, myId) {
 function renderWeapons(me) {
   ui.weaponList.replaceChildren();
   WEAPON_ORDER.forEach((w, i) => {
-    // bolt is owned from the start and never appears in `tech` as a purchase
-    const owned = w.id === 'bolt' || (me.tech.get(w.id) ?? 0) > 0;
+    // the railgun is owned from the start and never appears in `tech` as a
+    // purchase — keep this in step with defaultWeapon in src/game/weapons/
+    const owned = w.id === 'rail' || (me.tech.get(w.id) ?? 0) > 0;
     if (!owned) return;
     const row = document.createElement('div');
     row.className = `w${me.weapon === w.id ? ' active' : ''}`;
@@ -688,6 +1197,18 @@ function renderWeapons(me) {
   // the fuse readout is only meaningful to weapons that detonate at a range
   ui.fuseTag.classList.toggle('hidden', me.weapon !== 'flak');
   ui.fuseTag.textContent = `fuse ${Math.round(me.fuse)} · wheel to adjust`;
+
+  // Ram cooldown. Shown whenever you OWN the ram, not only while it's
+  // selected: the whole point of a five-second lockout is planning around
+  // it, and you can't plan around a number that's hidden until you switch.
+  const ownsRam = (me.tech.get('ram') ?? 0) > 0;
+  ui.ramTag.classList.toggle('hidden', !ownsRam);
+  if (ownsRam) {
+    const left = Math.max(0, (me.ramReadyTick - estimatedTick()) * TICK_DT);
+    ui.ramFill.style.width = `${((1 - Math.min(1, left / RAM_COOLDOWN_SEC)) * 100).toFixed(1)}%`;
+    ui.ramTag.classList.toggle('ready', left <= 0);
+    ui.ramLabel.textContent = left > 0 ? `ram ${left.toFixed(1)}s` : 'ram ready';
+  }
 }
 
 function renderHint(me) {
@@ -699,9 +1220,11 @@ function renderHint(me) {
   ];
   if ((me.tech.get('lateral') ?? 0) > 0) parts.push('a/d: strafe');
   if (me.juiceMax > 0) parts.push('shift: dash');
-  parts.push('space: fire');
-  if ((me.tech.get('rail') ?? 0) > 0 || (me.tech.get('flak') ?? 0) > 0) parts.push('1-3: weapon');
-  parts.push('esc: release mouse');
+  parts.push('click/space: fire');
+  // only worth showing once there's more than the starting railgun to switch to
+  const extraGuns = WEAPON_ORDER.filter((w) => w.id !== 'rail' && (me.tech.get(w.id) ?? 0) > 0);
+  if (extraGuns.length) parts.push(`1-${WEAPON_ORDER.length}: weapon`);
+  parts.push('f: fullscreen', 'g: grid', 'm: mute', 'esc: release mouse');
   const text = parts.join('   ');
   if (ui.hint.textContent !== text) ui.hint.textContent = text;
 }
@@ -744,11 +1267,12 @@ function syncUi(room) {
     ui.title.textContent = `Round ${state.round} — outfitting`;
     ui.sub.textContent = me.ready
       ? 'Locked in. Waiting for the others.'
-      : 'Buy one, or skip and save toward something bigger.';
+      : 'Take one from the draw, tier up as much as you like, or bank it all.';
     ui.clock.textContent = mmss(remaining);
     ui.shopScrap.textContent = `${Math.floor(me.scrap)} scrap`;
     ui.skipBtn.disabled = me.ready;
     renderCards(me);
+    renderUpgradeMenu(me);
     const humans = [...state.players.values()].filter((p) => !p.isBot);
     const ready = humans.filter((p) => p.ready).length;
     ui.readyLine.textContent = humans.length > 1
@@ -766,7 +1290,7 @@ function syncUi(room) {
   // alpha it ghosts through as unreadable smudge, and every number on it
   // (round, clock, scrap) is already on the overlay itself. The reticle and
   // juice arc go with it — a crosshair over a shop screen is just noise.
-  for (const el of [ui.banner, ui.scrapTag, ui.hullWrap, ui.weaponStrip, reticleEl]) {
+  for (const el of [ui.banner, ui.scrapTag, ui.hullWrap, ui.weaponStrip, ui.killfeed, reticleEl]) {
     el.classList.toggle('hidden', !inCombat);
   }
   // the juice arc has a second reason to be hidden — no Juice Capacitor yet —
@@ -815,6 +1339,133 @@ function renderRoster(players, myId, listItems) {
   });
 }
 
+// --- target boxes ----------------------------------------------------------
+// A screen-space rectangle around every opponent, drawn as DOM over the
+// canvas rather than as geometry inside it. Three reasons it isn't a sprite:
+//
+//   1. It must be visible when the SHIP isn't — through rocks, through the
+//      moon, at any range. Anything in the scene graph gets depth-tested
+//      against that geometry; a sibling of the canvas simply can't be
+//      occluded by it.
+//   2. Screen-space means screen-space. A billboard still shears and scales
+//      with perspective at the edges of a 70° frustum; a div is axis-aligned
+//      to the viewport by construction.
+//   3. A 1px border stays 1px at any resolution, where a textured quad goes
+//      soft the moment it's scaled up.
+//
+// A ship is ~2.4 units long in an arena 2,700 units across, so past a couple
+// hundred units it's sub-pixel. The box is sized from the hull's true
+// projected size with a pixel floor, so it tracks the ship when close and
+// degrades into a findable marker when far.
+
+// Must track SHIP_RADIUS in src/game/tuning.ts and SHIP_LENGTH above: the
+// box frames what you actually have to hit, and a box drawn to the old
+// 1.2-unit hull around a 2.2-unit hitbox teaches the wrong aim.
+const SHIP_BOUND_RADIUS = 2.2;
+const TARGET_BOX_MIN_HALF = 7;   // px — floor, so a distant ship stays findable
+const TARGET_BOX_PAD = 1.35;     // grow past the hull so the box frames it
+const NAMETAG_GAP = 4;           // px between the top of the box and the name
+// How near an opponent has to be before an off-screen arrow appears for them.
+// Not "every enemy, always": in a full room that's a permanent ring of
+// arrows, which is the same as no arrows. This is roughly the range at which
+// someone can reach you before you could turn and react.
+const EDGE_ARROW_RANGE = 550;
+const EDGE_ARROW_INSET = 26;     // px in from the frame edge
+
+// Reused per frame rather than allocated per ship per frame.
+const _toShip = new THREE.Vector3();
+const _camFwd = new THREE.Vector3();
+const _camRight = new THREE.Vector3();
+const _camUp = new THREE.Vector3();
+const _ndc = new THREE.Vector3();
+// One projection result, overwritten per ship per frame. Every overlay for a
+// given ship is placed from it before the next ship is projected.
+const _placed = { dist: 0, onScreen: false, x: 0, y: 0, half: 0, sx: 0, sy: 0 };
+
+/**
+ * Where one ship is, in everything the overlays need: screen position and
+ * projected size when it's in frame, and a screen-space DIRECTION toward it
+ * either way.
+ *
+ * The behind-camera case is why this returns a direction rather than just a
+ * position. project() on a point behind the eye returns a mirrored on-screen
+ * position, so anything that trusted it would paint a confident marker in
+ * front of you while the real ship is at your back. The camera-space x/y
+ * components, though, point the correct way whether the target is ahead or
+ * behind — turn that way and you'll find it — which is exactly the question
+ * an edge arrow answers.
+ */
+function projectTarget(worldPos, camera, w, h) {
+  _toShip.copy(worldPos).sub(camera.position);
+  _camFwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
+  _camRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
+  _camUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
+
+  _placed.dist = _toShip.length();
+  _placed.sx = _toShip.dot(_camRight);
+  _placed.sy = _toShip.dot(_camUp);
+
+  const depth = _toShip.dot(_camFwd);
+  if (depth <= 0) {
+    _placed.onScreen = false;
+    return _placed;
+  }
+
+  _ndc.copy(worldPos).project(camera);
+  _placed.onScreen = Math.abs(_ndc.x) <= 1 && Math.abs(_ndc.y) <= 1;
+  // Half-height in pixels of a sphere of SHIP_BOUND_RADIUS at this depth.
+  // Uses `depth` (the along-view distance), not the straight-line distance —
+  // perspective divides by the view-space z, so using the hypotenuse would
+  // undersize boxes toward the edges of the frame.
+  const halfFov = (camera.fov * Math.PI) / 360; // fov is vertical, in degrees
+  const projected = (SHIP_BOUND_RADIUS / depth / Math.tan(halfFov)) * (h / 2);
+  _placed.half = Math.max(TARGET_BOX_MIN_HALF, projected * TARGET_BOX_PAD);
+  _placed.x = (_ndc.x * 0.5 + 0.5) * w;
+  _placed.y = (-_ndc.y * 0.5 + 0.5) * h;
+  return _placed;
+}
+
+function placeTargetBox(el, p) {
+  el.style.width = `${p.half * 2}px`;
+  el.style.height = `${p.half * 2}px`;
+  el.style.transform = `translate(${p.x - p.half}px, ${p.y - p.half}px)`;
+}
+
+function placeNametag(el, p) {
+  // sits on top of the box; the -50% centres the label on the ship, and has
+  // to come after the pixel translate or it would be measured against the
+  // viewport instead of the element
+  el.style.transform =
+    `translate(${p.x}px, ${p.y - p.half - NAMETAG_GAP}px) translate(-50%, -100%)`;
+}
+
+/**
+ * Pin an arrow to the edge of the frame, pointing at something you can't see.
+ *
+ * Walks out from screen centre along the target's screen-space direction
+ * until it meets the inset rectangle, which is what keeps the arrow ON the
+ * border rather than on an ellipse inside it — corners are exactly where a
+ * target that's behind-and-to-the-side ends up, and rounding them off puts
+ * the arrow somewhere the enemy isn't.
+ */
+function placeEdgeArrow(entry, p, w, h) {
+  let dx = p.sx;
+  let dy = -p.sy; // world up is screen down
+  const len = Math.hypot(dx, dy);
+  if (len < 1e-4) { dx = 0; dy = -1; } else { dx /= len; dy /= len; }
+
+  const halfW = Math.max(1, w / 2 - EDGE_ARROW_INSET);
+  const halfH = Math.max(1, h / 2 - EDGE_ARROW_INSET);
+  const t = Math.min(halfW / Math.max(1e-6, Math.abs(dx)), halfH / Math.max(1e-6, Math.abs(dy)));
+  const x = w / 2 + dx * t;
+  const y = h / 2 + dy * t;
+
+  entry.el.style.transform = `translate(${x}px, ${y}px) translate(-50%, -50%)`;
+  // The CSS triangle points up (screen -y), which is atan2(-1, 0) = -90deg,
+  // so +90 brings the measured angle back into the triangle's frame.
+  entry.tip.style.transform = `rotate(${(Math.atan2(dy, dx) * 180) / Math.PI + 90}deg)`;
+}
+
 // ---------------------------------------------------------------------------
 
 async function startGame(room) {
@@ -833,40 +1484,114 @@ async function startGame(room) {
 
   // --- scene ---
   const canvas = document.getElementById('game');
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  // logarithmicDepthBuffer is mandatory, not a nicety: the scene spans 0.1
+  // units (a ship's nose) to 25,000 km (the star sphere), and a linear 24-bit
+  // buffer over that range puts essentially all of its precision in the first
+  // few metres — everything past the cockpit z-fights into confetti.
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, logarithmicDepthBuffer: true });
   renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x0b0e1a);
-  scene.add(new THREE.GridHelper(200, 100, 0x3a4470, 0x1a2040)); // spatial reference
-  scene.add(makeStarfield());
+  scene.background = new THREE.Color(0x000000); // real space is black; the stars do the work
+  // Two grids, because one can't do both jobs. Toggled together with `g`.
+  //
+  // The FINE grid is the speed cue. Cell size is what you actually read
+  // motion off — cells per second, not units per second — so it's sized
+  // against cruise speed (maxWish) to land near 20 cells/s, the same rate the
+  // original 2-unit grid gave at the original cruise of 40. A single 3 km
+  // grid at 100 divisions is 30 units per cell, which is why flying felt like
+  // standing still: 1.3 cells a second.
+  //
+  // The COARSE grid is the scale cue, and only that: it reaches out toward
+  // the belt so the world doesn't visibly stop 200 units from spawn. Dropped
+  // slightly below the fine grid so the two don't z-fight where they cross.
+  const gridGroup = new THREE.Group();
+  const fineGrid = new THREE.GridHelper(400, 100, 0x3a4470, 0x1a2040); // 4 units/cell
+  const coarseGrid = new THREE.GridHelper(3000, 60, 0x2a3260, 0x151c38); // 50 units/cell
+  coarseGrid.position.y = -0.05;
+  gridGroup.add(fineGrid, coarseGrid);
+  scene.add(gridGroup);
+  activeGrid = gridGroup;
+
+  const distantStars = makeDistantStars();
+  scene.add(distantStars);
   const planet = makePlanet();
   scene.add(planet);
+  const sunMesh = makeSun();
+  scene.add(sunMesh);
+
   const asteroids = ASTEROID_FIELD.map((spec) => {
     const mesh = makeAsteroid(asteroidTemplate, spec);
     scene.add(mesh);
     return { mesh, spec };
   });
 
-  // the ship GLB and asteroids use lit (Standard) materials — without lights
-  // they render pure black. Hemisphere + a weak opposing fill keep every
-  // viewing angle readable (a lone directional left ships in silhouette from
-  // the shadowed side). Basic-material scenery (starfield, planet, shots)
-  // ignores these.
-  scene.add(new THREE.HemisphereLight(0xbdc9ff, 0x4a4038, 1.4));
-  const sun = new THREE.DirectionalLight(0xfff4e0, 2.2);
-  sun.position.set(60, 80, -40);
-  scene.add(sun);
-  const fill = new THREE.DirectionalLight(0x99aaff, 0.7);
-  fill.position.set(-50, -30, 60);
-  scene.add(fill);
+  // The ship GLB and the asteroids use lit (Standard) materials — without
+  // lights they render pure black. There is now a sun actually drawn in the
+  // sky, so the key light has to point along SUN_DIR or the lit limb of every
+  // rock disagrees with where the light visibly comes from.
+  //
+  // Ambient is deliberately almost nothing (0.02). Space has no sky bounce,
+  // and the previous hemisphere light at 1.4 was what made everything read as
+  // evenly-lit clay. The opposing fill at 1/50th of key is the entire budget
+  // for "don't let the dark side go pure black" — cool blue against the warm
+  // key, so a silhouetted ship still separates from the starfield.
+  scene.add(new THREE.AmbientLight(0xffffff, 0.023)); // 0.02 +15%
+  const SUN_INTENSITY = 2.8;
+  const sunLight = new THREE.DirectionalLight(0xffeed6, SUN_INTENSITY);
+  sunLight.position.copy(SUN_DIR);
+  sunLight.target.position.set(0, 0, 0);
+  scene.add(sunLight, sunLight.target);
+  // /8, not the /50 this started at. Three.js applies a Lambertian 1/π to
+  // diffuse (unconditional since r155), so these intensities are all worth
+  // about a third of what they read as: the hull's lit side lands at ~123/255
+  // and, at /50, its shadow side landed at ~17/255 — effectively black. The
+  // hemisphere light this replaced was carrying the entire shadow side at
+  // ~70-90/255, and dropping it cut that by ~18x.
+  //
+  // /8 puts the shadow side near 45/255: a ~2.7:1 key-to-fill ratio, so hulls
+  // stay readable in silhouette without going back to the evenly-lit clay
+  // look the hemisphere light gave. Lower the divisor for more drama, raise
+  // it for more readability.
+  const fill = new THREE.DirectionalLight(0x8ab4f8, SUN_INTENSITY / 8);
+  fill.position.copy(SUN_DIR).negate();
+  fill.target.position.set(0, 0, 0);
+  scene.add(fill, fill.target);
 
-  const camera = new THREE.PerspectiveCamera(70, canvas.clientWidth / canvas.clientHeight, 0.1, 1000);
+  // far plane has to clear the star sphere at 16,000 km; the log buffer above
+  // is what makes a range this wide survivable
+  const camera = new THREE.PerspectiveCamera(70, canvas.clientWidth / canvas.clientHeight, 0.1, 25000000);
+
+  // Canvas size changes on window resize AND on entering/leaving fullscreen;
+  // without this the projection keeps the old aspect and everything stretches.
+  // Cached CSS-pixel size of the canvas. The target-box loop needs it every
+  // frame, and reading clientWidth/Height there would force a layout flush
+  // per frame right before writing styles to those same boxes — the classic
+  // read/write thrash. It only changes on resize, so it's cached here.
+  const viewport = { w: 0, h: 0 };
+
+  function handleResize() {
+    const width = canvas.clientWidth;
+    const height = canvas.clientHeight;
+    if (width <= 0 || height <= 0) return;
+    viewport.w = width;
+    viewport.h = height;
+    renderer.setSize(width, height, false);
+    camera.aspect = width / height;
+    camera.updateProjectionMatrix();
+  }
+  window.addEventListener('resize', handleResize);
+  document.addEventListener('fullscreenchange', handleResize);
+  handleResize();
 
   // --- one ship + one list entry per player ---
   const meshes = new Map(); // sessionId -> Object3D (ship clone or fallback cube)
   window.__game = { scene, meshes, room }; // debug hook for headless inspection
   const listItems = new Map(); // sessionId -> <li>
+  // sessionId -> the three screen-space overlays for one opponent. They're
+  // created together and placed together (exactly one of box+tag or arrow is
+  // shown per frame), so they live in one entry rather than three maps.
+  const overlays = new Map();
   const $ = Colyseus.getStateCallbacks(room);
 
   $(room.state).players.onAdd((player, sessionId) => {
@@ -874,11 +1599,36 @@ async function startGame(room) {
     const mesh = shipTemplate
       ? shipTemplate.clone(true)
       : new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshNormalMaterial());
+    mesh.add(makeEngineGlow());
     // first-person: our own hull stays in the scene graph (it carries the
     // authoritative position the camera and weapons read) but is never drawn
     if (sessionId === room.sessionId) mesh.visible = false;
     scene.add(mesh);
     meshes.set(sessionId, mesh);
+
+    // one set of overlays per opponent; never for ourselves
+    if (sessionId !== room.sessionId) {
+      const box = document.createElement('div');
+      box.className = 'target-box hidden';
+      ui.targetBoxes.appendChild(box);
+
+      const tag = document.createElement('div');
+      tag.className = 'nametag hidden';
+      tag.textContent = player.name;
+      ui.nametags.appendChild(tag);
+
+      const arrow = document.createElement('div');
+      arrow.className = 'edge-arrow hidden';
+      const tip = document.createElement('div');
+      tip.className = 'tip';
+      const who = document.createElement('div');
+      who.className = 'who';
+      who.textContent = player.name;
+      arrow.append(tip, who);
+      ui.edgeArrows.appendChild(arrow);
+
+      overlays.set(sessionId, { box, tag, el: arrow, tip });
+    }
 
     const li = document.createElement('li');
     li.textContent = player.name;
@@ -889,9 +1639,13 @@ async function startGame(room) {
   $(room.state).players.onRemove((_player, sessionId) => {
     const mesh = meshes.get(sessionId);
     // ship clones share the template's geometry (never dispose it); only the
-    // fallback cube owns its own geometry
+    // fallback cube owns its own geometry. The engine glow's material is
+    // shared across every ship, so it outlives any one of them too.
     if (mesh) { scene.remove(mesh); mesh.geometry?.dispose(); }
     meshes.delete(sessionId);
+    const overlay = overlays.get(sessionId);
+    if (overlay) { overlay.box.remove(); overlay.tag.remove(); overlay.el.remove(); }
+    overlays.delete(sessionId);
     listItems.get(sessionId)?.remove();
     listItems.delete(sessionId);
   });
@@ -905,18 +1659,25 @@ async function startGame(room) {
   $(room.state).shots.onAdd((shot, id) => {
     const fx = SHOT_FX[shot.kind];
     if (!fx) return; // a weapon whose FX aren't implemented yet
+    const mine = shot.shooter === room.sessionId;
+    const origin = new THREE.Vector3(shot.ox, shot.oy, shot.oz);
     const built = fx.create({
-      origin: new THREE.Vector3(shot.ox, shot.oy, shot.oz),
+      origin,
       dir: new THREE.Vector3(shot.dx, shot.dy, shot.dz),
       param: shot.param,
-      mine: shot.shooter === room.sessionId,
+      mine,
       viewQuat: predictedQuat,
     });
     scene.add(built.mesh);
     shots.set(id, {
       ...built, param: shot.param, kind: shot.kind, spawnTick: shot.spawnTick,
-      mine: shot.shooter === room.sessionId,
+      mine, shooter: shot.shooter, attach: fx.attach === true,
     });
+    // Fired off the replicated shot rather than off our own trigger press:
+    // the server may have dropped the pull for cooldown, and a gun that
+    // clicks when it didn't actually shoot teaches the wrong cadence. Our
+    // own shots skip attenuation so they stay at the front of the mix.
+    playSound(shot.kind, mine ? undefined : camera.position.distanceTo(origin));
   });
 
   $(room.state).shots.onRemove((_shot, id) => {
@@ -933,10 +1694,16 @@ async function startGame(room) {
   const blasts = new Map(); // id -> { mesh, radius, spawnTick }
 
   $(room.state).blasts.onAdd((blast, id) => {
-    const mesh = createBlast(blast.radius);
+    const mesh = createBlast(blast.radius, blast.kind);
     mesh.position.set(blast.x, blast.y, blast.z);
     scene.add(mesh);
-    blasts.set(id, { mesh, radius: blast.radius, spawnTick: blast.spawnTick });
+    blasts.set(id, {
+      mesh, radius: blast.radius, kind: blast.kind, spawnTick: blast.spawnTick,
+    });
+    playSound(
+      blast.kind === 'death' ? 'death' : 'blast',
+      camera.position.distanceTo(mesh.position)
+    );
   });
 
   $(room.state).blasts.onRemove((_blast, id) => {
@@ -957,11 +1724,28 @@ async function startGame(room) {
   // back as a message rather than silently doing nothing
   room.onMessage('shopError', (reason) => { status.textContent = `can't buy that: ${reason}`; });
 
+  // One per point of damage WE dealt. Not inferrable client-side: the server
+  // resolves hits against a lag-compensated rewind of the world, which by
+  // definition isn't the world this client drew.
+  room.onMessage('hit', (msg) => {
+    flashHitmarker(msg.killed);
+    playSound(msg.killed ? 'killmark' : 'hitmark');
+  });
+
+  room.onMessage('kill', (msg) => pushKillfeed(msg, room.sessionId));
+
   let running = true; // render loop checks this before scheduling another frame
   room.onLeave(() => {
     running = false;
     currentRoom = null;
+    activeGrid = null;
     held.clear();
+    releaseTrigger();
+    // registered per session in startGame, so they have to come back off or
+    // every rejoin stacks another pair onto a renderer that no longer exists
+    window.removeEventListener('resize', handleResize);
+    document.removeEventListener('fullscreenchange', handleResize);
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
     if (document.pointerLockElement) document.exitPointerLock();
     meshes.forEach((mesh) => { scene.remove(mesh); mesh.geometry?.dispose(); });
     meshes.clear();
@@ -970,6 +1754,11 @@ async function startGame(room) {
     blasts.forEach(({ mesh }) => { scene.remove(mesh); disposeBlast(mesh); });
     blasts.clear();
     disposeFx();
+    overlays.clear();
+    ui.targetBoxes.replaceChildren();
+    ui.nametags.replaceChildren();
+    ui.edgeArrows.replaceChildren();
+    ui.killfeed.replaceChildren();
     listItems.clear();
     playerList.innerHTML = '';
     renderer.dispose();
@@ -1002,29 +1791,31 @@ async function startGame(room) {
 
     const nowTick = estimatedTick();
 
-    shots.forEach((entry) => {
-      SHOT_FX[entry.kind]?.update(entry, Math.max(0, (nowTick - entry.spawnTick) * TICK_DT));
-    });
     blasts.forEach((entry) => {
-      updateBlast(entry.mesh, entry.radius, Math.max(0, (nowTick - entry.spawnTick) * TICK_DT));
+      updateBlast(
+        entry.mesh, entry.radius,
+        Math.max(0, (nowTick - entry.spawnTick) * TICK_DT), entry.kind
+      );
     });
 
-    // asteroids drift and tumble as pure functions of the shared tick, so
-    // every client sees the identical field. Drift is sinusoidal (bounded —
-    // rocks orbit their home position, never wander off), tumble is a slow
-    // constant spin; both rates vary per rock via its seed.
+    // Asteroids drift and tumble as pure functions of the shared tick, so
+    // every client sees the identical field with nothing replicated. Drift is
+    // sinusoidal (bounded — rocks orbit their home position, never wander
+    // off), tumble is a constant spin; both slow down as the rock gets bigger.
+    // MUST match asteroidCenters() in src/game/tuning.ts, which is what the
+    // server collides ships and shots against.
     const tSec = nowTick * TICK_DT;
     asteroids.forEach(({ mesh, spec }) => {
-      const { p, seed } = spec;
+      const { p0, driftAmp: a, driftFreq: f, driftPhase: ph, rot0, rotV } = spec;
       mesh.position.set(
-        p[0] + 3 * Math.sin(tSec * 0.05 + seed * 7),
-        p[1] + 3 * Math.sin(tSec * 0.04 + seed * 13),
-        p[2] + 3 * Math.sin(tSec * 0.06 + seed * 3)
+        p0[0] + a[0] * Math.sin(tSec * f[0] + ph[0]),
+        p0[1] + a[1] * Math.sin(tSec * f[1] + ph[1]),
+        p0[2] + a[2] * Math.cos(tSec * f[2] + ph[2])
       );
       mesh.rotation.set(
-        seed * 1.3 + tSec * 0.03 * Math.sin(seed * 5),
-        seed * 2.1 + tSec * 0.05 * Math.cos(seed * 9),
-        seed * 0.7 + tSec * 0.02 * Math.sin(seed * 2)
+        rot0[0] + tSec * rotV[0],
+        rot0[1] + tSec * rotV[1],
+        rot0[2] + tSec * rotV[2]
       );
     });
 
@@ -1054,7 +1845,76 @@ async function startGame(room) {
       camera.quaternion.copy(predictedQuat);
     }
 
+    // Shots are stepped AFTER the hulls are placed, because an attached shot
+    // (the ram dome) is welded to one of them — updating it first would hang
+    // the dome a frame behind the ship it's supposed to be part of, which at
+    // these speeds is a visible gap between the field and the bow. Free-flying
+    // shots don't care either way; they're placed analytically off `age`.
+    shots.forEach((entry) => {
+      if (entry.attach) {
+        const host = meshes.get(entry.shooter);
+        // the shooter can leave while their dome is still up; the server
+        // drops it on the next tick, and until then it just stops tracking
+        if (host) {
+          entry.mesh.position.copy(host.position);
+          entry.mesh.quaternion.copy(host.quaternion);
+        }
+      }
+      SHOT_FX[entry.kind]?.update(entry, Math.max(0, (nowTick - entry.spawnTick) * TICK_DT));
+    });
+
+    // Target boxes, projected against the camera that was just placed above.
+    // Doing this before the camera moves would leave every box a frame behind
+    // its ship, which at these speeds reads as the box lagging on a string.
+    // canvas.clientWidth/Height rather than the renderer's buffer size, since
+    // these are CSS pixels laid over the canvas — the two differ under
+    // devicePixelRatio and in fullscreen.
+    if (overlays.size > 0) {
+      // project() reads camera.matrixWorldInverse, which the renderer only
+      // refreshes inside render(). Without this the boxes would be projected
+      // against LAST frame's camera — precisely the one-frame lag on a string
+      // that placing them here is meant to avoid.
+      camera.updateMatrixWorld();
+      const { w, h } = viewport;
+      overlays.forEach((overlay, sessionId) => {
+        const mesh = meshes.get(sessionId);
+        // mesh.visible already encodes "alive" for opponents, so a wreck
+        // stops being marked without a second aliveness check here
+        if (!mesh?.visible) {
+          overlay.box.classList.add('hidden');
+          overlay.tag.classList.add('hidden');
+          overlay.el.classList.add('hidden');
+          return;
+        }
+
+        const placed = projectTarget(mesh.position, camera, w, h);
+        // Exactly one of the two treatments, never both: a box and an arrow
+        // for the same ship at the same time is two answers to one question.
+        const boxed = placed.onScreen;
+        const arrowed = !boxed && placed.dist <= EDGE_ARROW_RANGE;
+
+        if (boxed) {
+          placeTargetBox(overlay.box, placed);
+          placeNametag(overlay.tag, placed);
+        } else if (arrowed) {
+          placeEdgeArrow(overlay, placed, w, h);
+        }
+        overlay.box.classList.toggle('hidden', !boxed);
+        overlay.tag.classList.toggle('hidden', !boxed);
+        overlay.el.classList.toggle('hidden', !arrowed);
+      });
+    }
+
     planet.rotation.y += 0.0003; // slow spin, purely cosmetic
+
+    // The sun and the star sphere are meant to be infinitely far away, so they
+    // ride the camera: re-centring them every frame holds their angular size
+    // and kills all parallax, which is exactly how something at 14,000 km
+    // behaves. Do this AFTER the camera has been placed, or they lag a frame.
+    // The moon is deliberately left alone — the sliver of parallax it does
+    // have at 5,500 km is the only long-range cue that you're moving at all.
+    distantStars.position.copy(camera.position);
+    sunMesh.position.copy(camera.position).addScaledVector(SUN_DIR, SUN_DISTANCE);
 
     renderer.render(scene, camera);
     requestAnimationFrame(render);

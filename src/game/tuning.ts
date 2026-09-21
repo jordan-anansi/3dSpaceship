@@ -26,8 +26,13 @@ import { Quaternion, Vector3 } from 'three';
 // Speed perpendicular to your input is invisible to MAX_WISH, so turning is
 // how you gain speed: straight-line flight settles at MAX_WISH, but a carved
 // turn keeps the old component and adds a fresh one on a new axis.
-export const WISH_SPEED = 40;     // units/s requested at full deflection
-export const MAX_WISH = 40;       // units/s cap on the along-wishDir projection
+// Doubled from 40 when the arena grew: the belt runs from 207 to ~2,700
+// units out, and at the old cruise speed crossing it was a minute of holding
+// W. Both moved together on purpose — WISH_SPEED is the push and MAX_WISH is
+// the ceiling, so raising only the ceiling would have kept the same
+// acceleration and just made it take twice as long to get there.
+export const WISH_SPEED = 80;     // units/s requested at full deflection
+export const MAX_WISH = 80;       // units/s cap on the along-wishDir projection
 export const THRUST_ACCEL = 0.25; // Source-style: accelSpeed = accel · wishSpeed · dt
 export const MOUSE_SENS = 0.002;  // rad of rotation per pixel of mouse delta
 // MOUSE_SENS and the yaw→pitch→roll batch fold in LobbyRoom.drainLook are
@@ -41,13 +46,13 @@ export const MOUSE_SENS = 0.002;  // rad of rotation per pixel of mouse delta
 // instead of decaying asymptotically.
 //
 // Terminal speeds that fall out of this, with drag at its default 0.15:
-//   straight line — exactly MAX_WISH (40); the projection cap binds first
-//   carved        — sqrt(THRUST_ACCEL · WISH_SPEED · MAX_WISH / drag) ≈ 52,
+//   straight line — exactly MAX_WISH (80); the projection cap binds first
+//   carved        — sqrt(THRUST_ACCEL · WISH_SPEED · MAX_WISH / drag) ≈ 103,
 //                   because a push held just inside the cap contributes
 //                   accel·wish·(MAX_WISH/v) per second, not accel·wish
-// (WISH_SPEED · THRUST_ACCEL / drag ≈ 67 is the UNCAPPED figure — it only
+// (WISH_SPEED · THRUST_ACCEL / drag ≈ 133 is the UNCAPPED figure — it only
 // applies if MAX_WISH is raised above it.)
-export const STOP_SPEED = 6;      // units/s below which the bleed goes constant
+export const STOP_SPEED = 12;     // units/s below which the bleed goes constant
 
 // Deadlock's bleed-off is a speed GOVERNOR, not a clamp: you're allowed past
 // cruise speed, you just decay out of it fast, and every bit of momentum
@@ -70,8 +75,26 @@ export const DRAG_GOVERNOR = 5;        // drag multiplier once fully engaged
 // Absolute rail, NOT a gameplay cap — the governor is what bounds speed in
 // play. It exists only because `drag` is live-tunable down to 0, which
 // otherwise leaves nothing bounding the integrator at all.
-export const SPEED_RAIL = 150;
-export const SHIP_RADIUS = 1.0; // bounding sphere, same figure the shot tests assume
+//
+// Has to move with MAX_WISH or it stops being a rail and starts being a cap:
+// the governor is fully engaged at 1.75 · maxWish (140), so leaving this at
+// 150 would have left 10 units/s of gap and turned the integrator backstop
+// into an everyday clamp — exactly the magnitude cap this model exists to
+// avoid. 300 keeps the original ~3.75x headroom over cruise.
+export const SPEED_RAIL = 300;
+// Bounding sphere. Every weapon's hit radius is derived from this rather than
+// hardcoded, so widening the target widens it for all of them at once —
+// otherwise "bigger hitboxes" silently means "bigger for the railgun only".
+//
+// 2.2 is deliberately GENEROUS against a hull that's about 2.4 units long,
+// i.e. a true radius near 1.2. Ships cross at a combined 160 units/s in an
+// arena 2,700 units across, and at those closing speeds a physically honest
+// sphere means most well-aimed shots register as misses. The hull model is
+// scaled up to match in public/client.js (SHIP_BOUND_RADIUS and the GLB
+// normalizer) so what you shoot at is what you see.
+export const SHIP_RADIUS = 2.2;
+// Cosmetic shell drawn where a ship died. No damage — see Blast.kind.
+export const DEATH_BLAST_RADIUS = 12;
 
 // --- dash ---
 // A one-shot impulse (Deadlock's air dash is an impulse, not a sustained
@@ -96,7 +119,9 @@ export const SHIP_RADIUS = 1.0; // bounding sphere, same figure the shot tests a
 // changing direction is where the dash pays out, without ever cancelling the
 // motion you had.
 export const DASH_CEIL_MULT = 1.3;  // × maxWish — brief overspeed is allowed
-export const DASH_IMPULSE = 16;     // units/s, the hard limit on one dash's delta
+// Absolute, so it doubled with cruise speed. Left at 16 it would still have
+// "worked", just as 20% of cruise instead of 40% — a dash you can barely feel.
+export const DASH_IMPULSE = 32;     // units/s, the hard limit on one dash's delta
 // Overspeed has to leave quickly or the dash stops being a burst. Elevated
 // drag for the falloff window does that, and it self-corrects: thrust can
 // pull you back up to maxWish against it, but nothing can hold you above
@@ -140,8 +165,11 @@ export const ROUND_STIPEND_BASE = 40;
 export const ROUND_STIPEND_PER_ROUND = 10;
 
 // --- bots ---
-export const BOT_TARGET_COMBATANTS = 4; // bots top the field up to this many ships
-export const BOT_MAX = 5;
+// Both zero = no bots at all. sync() removes any already in the field, so
+// this switches them off live rather than only for new rooms. Put these back
+// to 4 / 5 to bring them back.
+export const BOT_TARGET_COMBATANTS = 0; // bots top the field up to this many ships
+export const BOT_MAX = 0;
 // Bots fire on the same weapon cooldowns players do, multiplied by this.
 // Above 1 = slower. A solo player faces three of them at once, so matching a
 // player's cadence three times over isn't "hard", it's a wall of bolts with
@@ -156,19 +184,115 @@ export const LOCAL_UP = new Vector3(0, 1, 0);
 
 // The asteroid field, duplicated from public/client.js — both sides MUST
 // agree or the server will stop ships against rocks the client draws
-// elsewhere. Drift is a pure function of the shared tick, so no replication
-// is needed beyond state.tick.
-export const ASTEROID_FIELD = [
-  { p: [-40, 10, -80], r: 12, seed: 1 },
-  { p: [25, -15, -50], r: 7, seed: 2 },
-  { p: [-70, -20, 40], r: 16, seed: 3 },
-  { p: [80, 30, 60], r: 9, seed: 4 },
-  { p: [0, 42, -120], r: 14, seed: 5 },
-  { p: [45, -35, -20], r: 6, seed: 6 },
-];
+// elsewhere. Rather than a hand-written list, both sides run the IDENTICAL
+// LCG below from the same seed, so the two can only drift if someone edits
+// one copy of the generator. Drift is a pure function of the shared tick, so
+// nothing here needs replicating beyond state.tick.
+//
+// The multiply stays exact in a double: s < 2^32 and 1664525 < 2^21, so the
+// product is under 2^53. That exactness is what makes JS and TS agree.
+export interface Rock {
+  p0: [number, number, number];
+  r: number;
+  driftAmp: [number, number, number];
+  driftFreq: [number, number, number];
+  driftPhase: [number, number, number];
+  rot0: [number, number, number];
+  rotV: [number, number, number];
+  seed: number;
+}
 
-export const asteroidCenter = (rock: typeof ASTEROID_FIELD[number], tSec: number) => new Vector3(
-  rock.p[0] + 3 * Math.sin(tSec * 0.05 + rock.seed * 7),
-  rock.p[1] + 3 * Math.sin(tSec * 0.04 + rock.seed * 13),
-  rock.p[2] + 3 * Math.sin(tSec * 0.06 + rock.seed * 3),
-);
+export function generateAsteroidField(count = 100): Rock[] {
+  let s = 987654321;
+  const rnd = () => {
+    s = (s * 1664525 + 1013904223) % 4294967296;
+    return s / 4294967296;
+  };
+
+  const field: Rock[] = [];
+  for (let i = 0; i < count; i++) {
+    // Power-law radii: many 5-40u boulders, dozens of mid rocks, a few
+    // 200-500u monoliths. Cubing the uniform is what keeps giants rare.
+    const r = 5 + Math.pow(rnd(), 3.5) * 495;
+
+    // A belt around the arena, with bigger rocks pushed further out so a
+    // monolith can never engulf the spawn sphere (SPAWN_RADIUS = 60, and the
+    // nearest possible rock surface sits at 120 + 1.6r - r > 120).
+    const angle = rnd() * Math.PI * 2;
+    const dist = 120 + r * 1.6 + rnd() * 2600;
+    const height = (rnd() - 0.5) * (500 + r * 0.8);
+    const p0: [number, number, number] = [
+      Math.cos(angle) * dist,
+      height,
+      Math.sin(angle) * dist,
+    ];
+
+    // Mass stands in for inertia: the bigger the rock, the slower it drifts
+    // and the lazier it tumbles.
+    const speedFactor = Math.max(0.18, 1 - r / 520);
+    const driftAmp: [number, number, number] = [
+      (6 + rnd() * 18) * (0.6 + 0.4 * speedFactor),
+      (4 + rnd() * 14) * (0.6 + 0.4 * speedFactor),
+      (6 + rnd() * 18) * (0.6 + 0.4 * speedFactor),
+    ];
+    const driftFreq: [number, number, number] = [
+      (0.015 + rnd() * 0.03) * speedFactor,
+      (0.012 + rnd() * 0.025) * speedFactor,
+      (0.015 + rnd() * 0.03) * speedFactor,
+    ];
+    const driftPhase: [number, number, number] = [
+      rnd() * Math.PI * 2,
+      rnd() * Math.PI * 2,
+      rnd() * Math.PI * 2,
+    ];
+    const rot0: [number, number, number] = [
+      rnd() * Math.PI * 2,
+      rnd() * Math.PI * 2,
+      rnd() * Math.PI * 2,
+    ];
+    const maxRot = 0.03 + 0.18 * speedFactor;
+    const rotV: [number, number, number] = [
+      (rnd() - 0.5) * maxRot,
+      (rnd() - 0.5) * maxRot,
+      (rnd() - 0.5) * maxRot,
+    ];
+
+    field.push({ p0, r, driftAmp, driftFreq, driftPhase, rot0, rotV, seed: i + 1 });
+  }
+  return field;
+}
+
+export const ASTEROID_FIELD = generateAsteroidField(100);
+
+// Where every rock is at an instant, as a flat [x,y,z, x,y,z, ...] buffer.
+//
+// This is the hottest loop on the server: shots sweep the field every tick,
+// every ship collides against it every tick, and every bot paths around it
+// every tick. At six rocks, letting each caller recompute the sines cost
+// nothing. At a hundred it is ~600k sin calls and ~400k Vector3 allocations a
+// second, all of it recomputing the same numbers. So the field is evaluated
+// ONCE per distinct instant into a reused buffer and every caller reads that.
+//
+// Callers MUST treat the returned buffer as read-only — it is shared, and it
+// is overwritten on the next tick.
+const centerBuffer = new Float64Array(ASTEROID_FIELD.length * 3);
+let centerBufferAt = NaN;
+
+export function asteroidCenters(tSec: number): Float64Array {
+  if (tSec === centerBufferAt) return centerBuffer;
+  for (let i = 0; i < ASTEROID_FIELD.length; i++) {
+    const { p0, driftAmp: a, driftFreq: f, driftPhase: ph } = ASTEROID_FIELD[i];
+    centerBuffer[i * 3] = p0[0] + a[0] * Math.sin(tSec * f[0] + ph[0]);
+    centerBuffer[i * 3 + 1] = p0[1] + a[1] * Math.sin(tSec * f[1] + ph[1]);
+    centerBuffer[i * 3 + 2] = p0[2] + a[2] * Math.cos(tSec * f[2] + ph[2]);
+  }
+  centerBufferAt = tSec;
+  return centerBuffer;
+}
+
+/** One rock's centre, by index. Convenience wrapper — hot loops read the
+ *  buffer directly rather than allocating a Vector3 per rock. */
+export const asteroidCenter = (index: number, tSec: number) => {
+  const c = asteroidCenters(tSec);
+  return new Vector3(c[index * 3], c[index * 3 + 1], c[index * 3 + 2]);
+};

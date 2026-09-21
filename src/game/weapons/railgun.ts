@@ -4,8 +4,8 @@ import { tierOf } from '../catalog';
 import type { CatalogEntry } from '../catalog';
 import type { FireContext, WeaponDef } from './types';
 
-// The sniper. Hitscan, slow cycle, punishing damage: every shot is a decision
-// rather than a stream, and the gun is entirely aim.
+// The starting gun. Hitscan, slow cycle, punishing damage: every shot is a
+// decision rather than a stream, and the gun is entirely aim.
 //
 // Nothing flies. The replicated Shot is an inert TRACER — no step(), it just
 // ages out after lifeTicks — whose only job is to tell clients where to draw
@@ -36,16 +36,13 @@ const hitRadiusOf = (player: Player) =>
 
 const cooldownFor = (tier: number) => RAIL_BASE_COOLDOWN_MS - RAIL_COOLDOWN_PER_TIER * tier;
 
+// No 'rail' tech card: the railgun is the STARTING gun (see weapons/index.ts
+// → defaultWeapon), so there is nothing to unlock. Its tiers are therefore
+// unconditional rather than gated behind `requires: 'rail'` — a requirement
+// on something every player already owns would just never filter anything,
+// and `available()` reads tierOf(requires) === 0, which is exactly what an
+// owned-by-default weapon reports.
 const cards: CatalogEntry[] = [
-  {
-    id: 'rail',
-    name: 'Railgun',
-    kind: 'tech',
-    blurb: () => `Hitscan sniper. ${RAIL_BASE_DAMAGE} damage the instant you fire, ${(RAIL_BASE_COOLDOWN_MS / 1000).toFixed(1)}s between shots.`,
-    maxTier: 1,
-    baseCost: 200,
-    costMult: 1,
-  },
   {
     // Cooldown rather than damage on purpose: damage would just move the
     // shots-to-kill count, while cycle time moves what the gun IS. At 1.4s
@@ -58,7 +55,6 @@ const cards: CatalogEntry[] = [
     maxTier: 2,
     baseCost: 130,
     costMult: 1.6,
-    requires: 'rail',
   },
   {
     // The other axis that changes the gun's role: at 600 units a 1-unit
@@ -72,7 +68,6 @@ const cards: CatalogEntry[] = [
     maxTier: 2,
     baseCost: 120,
     costMult: 1.6,
-    requires: 'rail',
   },
 ];
 

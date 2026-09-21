@@ -9,12 +9,21 @@ import { WEAPONS, defaultWeapon, weaponFor } from '../game/weapons';
 import type { Hit, StepContext, SweepOpts } from '../game/weapons';
 import {
   ASTEROID_FIELD, BOT_FIRE_COOLDOWN_MULT, BOT_MAX, BOT_TARGET_COMBATANTS, COMBAT_SECONDS, DASH_CEIL_MULT,
-  DASH_FALLOFF_DRAG, DASH_FALLOFF_TIME, DASH_IMPULSE, DRAG_GOVERNOR, DRAG_RAMP_HI_MULT,
-  DRAG_RAMP_LO_MULT, HISTORY_TICKS, INTERMISSION_SECONDS, LOCAL_FORWARD, LOCAL_RIGHT,
-  LOCAL_UP, MOUSE_SENS, RESPAWN_DELAY_SEC, ROUND_STIPEND_BASE, ROUND_STIPEND_PER_ROUND,
+  DASH_FALLOFF_DRAG, DASH_FALLOFF_TIME, DASH_IMPULSE, DEATH_BLAST_RADIUS, DRAG_GOVERNOR,
+  DRAG_RAMP_HI_MULT, DRAG_RAMP_LO_MULT, HISTORY_TICKS, INTERMISSION_SECONDS, LOCAL_FORWARD,
+  LOCAL_RIGHT, LOCAL_UP, MOUSE_SENS, RESPAWN_DELAY_SEC, ROUND_STIPEND_BASE, ROUND_STIPEND_PER_ROUND,
   SCRAP_PER_BOT_KILL, SCRAP_PER_DAMAGE, SCRAP_PER_PLAYER_KILL, SHIP_RADIUS, SHOP_SECONDS,
-  SPAWN_RADIUS, SPEED_RAIL, STOP_SPEED, TICK_DT, asteroidCenter,
+  SPAWN_RADIUS, SPEED_RAIL, STOP_SPEED, TICK_DT, asteroidCenters,
 } from '../game/tuning';
+
+/**
+ * Which shot is currently resolving damage. Bound into the weapon context so
+ * damage() can attribute a hit without every weapon having to pass it: the
+ * token collapses multi-victim damage from one shot into one "hit" for
+ * accuracy, and the weapon id names the gun in the killfeed accurately even
+ * if the shooter has switched weapons since the shell left the tube.
+ */
+interface DamageSource { token: string; weapon: string }
 
 // The client implements the 'mouse' control scheme and nothing else: pointer
 // deltas yaw/pitch the ship, q/e roll, w/s thrust, a/d strafe once Lateral
@@ -100,6 +109,16 @@ export class LobbyRoom extends Room<LobbyState> {
   private history: { tick: number; positions: Map<string, Vector3> }[] = [];
   private shotCounter = 0;
   private blastCounter = 0;
+  private fireCounter = 0;
+  // sessionId → socket, so damage() can send a hitmarker to one shooter
+  // without scanning the client list on every point of damage dealt
+  private clientsById = new Map<string, Client>();
+  // shooter → the last shot token they scored with. One shot may damage
+  // several ships in one resolution pass (a flak burst, a ram dome); this
+  // collapses that into a single counted hit. Contiguity is what makes one
+  // slot enough: all of a shot's damage lands inside one fire() or one
+  // step() call, so no other shot can interleave with it.
+  private lastHitToken = new Map<string, string>();
   // seconds of elevated post-dash drag still owed, per session. The dash
   // itself is instantaneous, so this is the only state it leaves behind.
   private dashFalloff = new Map<string, number>();
@@ -223,9 +242,14 @@ export class LobbyRoom extends Room<LobbyState> {
     this.state.players.forEach((p, id) => {
       p.ready = false;
       p.offer.clear();
+      p.upgrades.clear();
       p.kills = 0;
       p.deaths = 0;
       p.roundScrap = 0;
+      p.damageDealt = 0;
+      p.shotsFired = 0;
+      p.shotsHit = 0;
+      p.ramReadyTick = 0;
       this.respawn(p, id);
     });
     console.log(`[lobby] round ${this.state.round}: fight`);
@@ -271,6 +295,8 @@ export class LobbyRoom extends Room<LobbyState> {
   private clearOrdnance() {
     this.state.shots.clear();
     this.state.blasts.clear();
+    // the tokens only ever refer to shots that no longer exist now
+    this.lastHitToken.clear();
   }
 
   // ------------------------------------------------------------ simulation
@@ -392,14 +418,17 @@ export class LobbyRoom extends Room<LobbyState> {
 
   /** Hand every in-flight shot to its weapon, and expire the stragglers. */
   private stepShots() {
-    const ctx = this.stepContext();
     this.state.shots.forEach((shot, id) => {
       const def = weaponFor(shot.kind);
       if (this.state.tick - shot.spawnTick > def.lifeTicks) {
         this.state.shots.delete(id);
         return;
       }
-      def.step?.(shot, id, ctx);
+      // One context per shot rather than one for the tick: each carries the
+      // shot's own id as the damage token, which is what lets a burst that
+      // catches three ships count as one hit. Shots in flight are a handful,
+      // so the allocation is nothing next to the sweeps it wraps.
+      def.step?.(shot, id, this.stepContext({ token: id, weapon: shot.kind }));
     });
   }
 
@@ -416,7 +445,7 @@ export class LobbyRoom extends Room<LobbyState> {
    * ship's hull ever goes down, so scrap payout, the kill counter and the
    * respawn schedule can't get out of step with each other.
    */
-  private damage(victimId: string, amount: number, byId: string) {
+  private damage(victimId: string, amount: number, byId: string, source?: DamageSource) {
     if (this.state.phase !== 'combat') return;
     const victim = this.state.players.get(victimId);
     if (!victim || !victim.alive || amount <= 0) return;
@@ -426,22 +455,45 @@ export class LobbyRoom extends Room<LobbyState> {
 
     const dealt = Math.min(amount, victim.hull);
     victim.hull -= dealt;
+    const killed = victim.hull <= 0;
 
     const shooter = this.state.players.get(byId);
-    // Paying for damage rather than only for kills means engaging is always
-    // worth something, so a player who loses every duel still shops.
-    if (shooter && !shooter.isBot) {
-      const earned = dealt * SCRAP_PER_DAMAGE;
-      shooter.scrap += earned;
-      shooter.roundScrap += earned;
+    if (shooter) {
+      // Clamped to the hull above, so an instant-kill weapon's nominal damage
+      // can't inflate this into a meaningless number on the scoreboard.
+      shooter.damageDealt += dealt;
+      if (source && this.lastHitToken.get(byId) !== source.token) {
+        this.lastHitToken.set(byId, source.token);
+        shooter.shotsHit += 1;
+      }
+      // Paying for damage rather than only for kills means engaging is always
+      // worth something, so a player who loses every duel still shops.
+      if (!shooter.isBot) {
+        const earned = dealt * SCRAP_PER_DAMAGE;
+        shooter.scrap += earned;
+        shooter.roundScrap += earned;
+      }
     }
 
-    if (victim.hull > 0) return;
+    // Hitmarker. Sent per damage EVENT, not per shot: a flak burst catching
+    // two ships should tick twice, which is a different question from what
+    // accuracy counts above. Fire-and-forget — a shooter who has already
+    // disconnected simply isn't in the map.
+    this.clientsById.get(byId)?.send('hit', {
+      amount: Math.round(dealt),
+      killed,
+      victim: victim.name,
+    });
+
+    if (!killed) return;
 
     victim.hull = 0;
     victim.alive = false;
     victim.deaths += 1;
     victim.respawnTick = this.state.tick + this.secondsToTicks(RESPAWN_DELAY_SEC);
+    // The wreck keeps drifting server-side but stops being drawn, so without
+    // something at the moment of death a ship just blinks out. Cosmetic only.
+    this.spawnBlast(new Vector3(victim.x, victim.y, victim.z), DEATH_BLAST_RADIUS, 'death');
     if (shooter) {
       shooter.kills += 1;
       if (!shooter.isBot) {
@@ -450,6 +502,20 @@ export class LobbyRoom extends Room<LobbyState> {
         shooter.roundScrap += bounty;
       }
     }
+    // Broadcast rather than sent to the two parties: the feed is for everyone,
+    // and knowing who is beating whom is how you decide where to fly next.
+    // The weapon comes off the SHOT (via source), not off shooter.weapon — a
+    // shell still in flight when its owner switched guns should credit the
+    // gun that fired it.
+    this.broadcast('kill', {
+      by: shooter?.name ?? '',
+      byId,
+      byBot: shooter?.isBot ?? false,
+      victim: victim.name,
+      victimId,
+      victimBot: victim.isBot,
+      weapon: source ? weaponFor(source.weapon).name : '',
+    });
     console.log(`[lobby] ${shooter?.name ?? '?'} destroyed ${victim.name}`);
   }
 
@@ -508,8 +574,14 @@ export class LobbyRoom extends Room<LobbyState> {
     const aim = new Quaternion(shooter.qx, shooter.qy, shooter.qz, shooter.qw);
     const dir = LOCAL_FORWARD.clone().applyQuaternion(aim).normalize();
 
+    // Counted here rather than inside the weapon: this is the point at which
+    // the trigger pull definitely became a shot (owned, off cooldown, alive),
+    // and counting it anywhere else would make accuracy a function of how
+    // each weapon happens to be written.
+    shooter.shotsFired += 1;
+
     def.fire({
-      ...this.worldContext(),
+      ...this.worldContext({ token: `f${this.fireCounter++}`, weapon: def.id }),
       shooterId: sessionId,
       shooter,
       origin: new Vector3(shooter.x, shooter.y, shooter.z),
@@ -543,8 +615,9 @@ export class LobbyRoom extends Room<LobbyState> {
     return id;
   }
 
-  private spawnBlast(pos: Vector3, radius: number) {
+  private spawnBlast(pos: Vector3, radius: number, kind = 'burst') {
     const blast = new Blast();
+    blast.kind = kind;
     blast.x = pos.x; blast.y = pos.y; blast.z = pos.z;
     blast.radius = radius;
     blast.spawnTick = this.state.tick;
@@ -556,8 +629,15 @@ export class LobbyRoom extends Room<LobbyState> {
     return slot && slot.tick === tick ? slot.positions : null;
   }
 
-  /** The half of the weapon context that both fire() and step() share. */
-  private worldContext() {
+  /**
+   * The half of the weapon context that both fire() and step() share.
+   *
+   * `source` names the shot whose damage this context will apply, and is
+   * baked into the damage closure rather than added to the WeaponDef
+   * interface — a weapon shouldn't have to remember to pass its own identity
+   * along to get accuracy and killfeed attribution right.
+   */
+  private worldContext(source: DamageSource) {
     return {
       tick: this.state.tick,
       players: this.state.players as MapSchema<Player>,
@@ -567,14 +647,14 @@ export class LobbyRoom extends Room<LobbyState> {
       shipsInRadius: (center: Vector3, radius: number, exclude?: string) =>
         this.shipsInRadius(center, radius, exclude),
       damage: (victimId: string, amount: number, byId: string) =>
-        this.damage(victimId, amount, byId),
+        this.damage(victimId, amount, byId, source),
       spawnBlast: (pos: Vector3, radius: number) => this.spawnBlast(pos, radius),
     };
   }
 
-  private stepContext(): StepContext {
+  private stepContext(source: DamageSource): StepContext {
     return {
-      ...this.worldContext(),
+      ...this.worldContext(source),
       dt: TICK_DT,
       deleteShot: (id: string) => { this.state.shots.delete(id); },
     };
@@ -612,15 +692,25 @@ export class LobbyRoom extends Room<LobbyState> {
 
   /** Distance to the first asteroid surface along the ray, or Infinity. */
   private sweepAsteroids(from: Vector3, dir: Vector3, maxDist: number) {
-    const tSec = this.state.tick * TICK_DT;
+    const centers = asteroidCenters(this.state.tick * TICK_DT);
     let nearest = Infinity;
-    for (const rock of ASTEROID_FIELD) {
-      const toCenter = asteroidCenter(rock, tSec).sub(from);
-      const r2 = rock.r * rock.r;
-      if (toCenter.lengthSq() <= r2) return 0; // already inside the rock
-      const b = toCenter.dot(dir);
+    for (let i = 0; i < ASTEROID_FIELD.length; i++) {
+      // scalars, not Vector3s: this runs per rock per shot per tick, and the
+      // allocations were the expensive part long before the arithmetic was
+      const cx = centers[i * 3] - from.x;
+      const cy = centers[i * 3 + 1] - from.y;
+      const cz = centers[i * 3 + 2] - from.z;
+      const r = ASTEROID_FIELD[i].r;
+      const r2 = r * r;
+      const distSq = cx * cx + cy * cy + cz * cz;
+      if (distSq <= r2) return 0; // already inside the rock
+      // broad phase: the belt is 2700 units across, so most rocks are nowhere
+      // near any given ray and this one compare rejects them
+      const reach = maxDist + r;
+      if (distSq > reach * reach) continue;
+      const b = cx * dir.x + cy * dir.y + cz * dir.z;
       if (b < 0) continue;
-      const d2 = toCenter.lengthSq() - b * b;
+      const d2 = distSq - b * b;
       if (d2 > r2) continue;
       const t = b - Math.sqrt(r2 - d2);
       if (t <= maxDist && t < nearest) nearest = t;
@@ -669,26 +759,32 @@ export class LobbyRoom extends Room<LobbyState> {
   // is something to carve through rather than something to avoid. Rocks are
   // spheres, so the plane normal is just the outward radial direction.
   private collideAsteroids(p: Player) {
-    const tSec = this.state.tick * TICK_DT;
-    for (const rock of ASTEROID_FIELD) {
-      const c = asteroidCenter(rock, tSec);
-      const n = new Vector3(p.x - c.x, p.y - c.y, p.z - c.z);
-      const dist = n.length();
-      const surface = rock.r + SHIP_RADIUS;
-      if (dist >= surface || dist < 1e-6) continue;
-      n.divideScalar(dist); // outward unit normal
+    const centers = asteroidCenters(this.state.tick * TICK_DT);
+    for (let i = 0; i < ASTEROID_FIELD.length; i++) {
+      const cx = centers[i * 3];
+      const cy = centers[i * 3 + 1];
+      const cz = centers[i * 3 + 2];
+      const surface = ASTEROID_FIELD[i].r + SHIP_RADIUS;
+      // scalar broad phase before the sqrt — at 100 rocks this rejects
+      // essentially all of them for the cost of three multiplies
+      let nx = p.x - cx, ny = p.y - cy, nz = p.z - cz;
+      const distSq = nx * nx + ny * ny + nz * nz;
+      if (distSq >= surface * surface) continue;
+      const dist = Math.sqrt(distSq);
+      if (dist < 1e-6) continue;
+      nx /= dist; ny /= dist; nz /= dist; // outward unit normal
 
       // lift the ship back out to the surface so it can't sink in
-      p.x = c.x + n.x * surface;
-      p.y = c.y + n.y * surface;
-      p.z = c.z + n.z * surface;
+      p.x = cx + nx * surface;
+      p.y = cy + ny * surface;
+      p.z = cz + nz * surface;
 
       // only the inward component is removed; no bounce, no tangential loss
-      const backoff = p.vx * n.x + p.vy * n.y + p.vz * n.z;
+      const backoff = p.vx * nx + p.vy * ny + p.vz * nz;
       if (backoff < 0) {
-        p.vx -= n.x * backoff;
-        p.vy -= n.y * backoff;
-        p.vz -= n.z * backoff;
+        p.vx -= nx * backoff;
+        p.vy -= ny * backoff;
+        p.vz -= nz * backoff;
       }
     }
   }
@@ -741,7 +837,10 @@ export class LobbyRoom extends Room<LobbyState> {
   onJoin(client: Client, options: { name?: string }) {
     const player = new Player();
     player.name = (options.name || 'anonymous').slice(0, 24);
-    player.tech.set('bolt', 1); // the starting gun is owned, not bought
+    // No tech entry for the starting gun. Ownership of `defaultWeapon` is a
+    // special case everywhere it's checked (setWeapon, fire, the HUD strip),
+    // so granting it a tier would be a second source of truth — and there is
+    // no catalog card that could ever legitimately set one.
     applyStats(player);
     const at = randomSpawn();
     player.x = at.x; player.y = at.y; player.z = at.z;
@@ -749,6 +848,7 @@ export class LobbyRoom extends Room<LobbyState> {
     player.qx = q.x; player.qy = q.y; player.qz = q.z; player.qw = q.w;
 
     this.state.players.set(client.sessionId, player);
+    this.clientsById.set(client.sessionId, client);
     // Joining mid-shop gets you cards for the round you're about to fight;
     // joining mid-combat drops you straight in, and you shop at the break.
     if (this.state.phase === 'shop') drawOffer(player);
@@ -759,10 +859,12 @@ export class LobbyRoom extends Room<LobbyState> {
     const player = this.state.players.get(client.sessionId);
     console.log(`[lobby] ${player?.name} left (${client.sessionId})`);
     this.state.players.delete(client.sessionId);
+    this.clientsById.delete(client.sessionId);
     this.inputs.delete(client.sessionId);
     this.lastFireTime.delete(client.sessionId);
     this.pendingLook.delete(client.sessionId);
     this.dashFalloff.delete(client.sessionId);
+    this.lastHitToken.delete(client.sessionId);
     this.bots.forget(client.sessionId);
 
     // A run with nobody left in it goes back to the start rather than

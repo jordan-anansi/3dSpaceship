@@ -2,6 +2,7 @@ import type { CatalogEntry } from '../catalog';
 import { bolt } from './bolt';
 import { flak } from './flak';
 import { railgun } from './railgun';
+import { ram } from './ram';
 import type { WeaponDef } from './types';
 
 // The weapon registry. Adding a gun is: write one file next to this one,
@@ -10,9 +11,9 @@ import type { WeaponDef } from './types';
 // to learn the new weapon's name.
 
 /** Owned from the start; also the fallback whenever a selection is invalid. */
-export const defaultWeapon = 'bolt';
+export const defaultWeapon = 'rail';
 
-const DEFS: WeaponDef[] = [bolt, railgun, flak];
+const DEFS: WeaponDef[] = [railgun, bolt, flak, ram];
 
 export const WEAPONS = new Map(DEFS.map((def) => [def.id, def]));
 
@@ -20,7 +21,8 @@ export const WEAPONS = new Map(DEFS.map((def) => [def.id, def]));
 export const WEAPON_CARDS: CatalogEntry[] = DEFS.flatMap((def) => def.cards);
 
 /** Never returns undefined — an unknown id falls back to the starting gun. */
-export const weaponFor = (id: string) => WEAPONS.get(id) ?? bolt;
+export const weaponFor = (id: string) => WEAPONS.get(id) ?? railgun;
 
 export { BOLT_SPEED } from './bolt';
+export { RAM_BASE_RADIUS, RAM_COOLDOWN_MS, RAM_DURATION_TICKS } from './ram';
 export type { FireContext, Hit, StepContext, SweepOpts, WeaponDef } from './types';
