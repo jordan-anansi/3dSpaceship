@@ -7,6 +7,10 @@
     "help": "node help.js",
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
+    "bot": "tsx --env-file-if-exists=.env src/bot/index.ts",
+    "bot:dev": "tsx watch --env-file-if-exists=.env src/bot/index.ts",
+    "queue:peek": "tsx --env-file-if-exists=.env src/queue/peek.ts",
+    "queue:apply": "tsx --env-file-if-exists=.env src/worker/apply.ts",
     "url": "node lan-url.js",
     "tunnel": "./bin/cloudflared tunnel --url http://localhost:${PORT:-2567}"
   },
@@ -16,6 +20,7 @@
     "@colyseus/core": "^0.16.24",
     "@colyseus/schema": "^3.0.0",
     "@colyseus/ws-transport": "^0.16.5",
+    "discord.js": "^14.27.0",
     "express": "^4.21.0",
     "three": "^0.185.1"
   },
