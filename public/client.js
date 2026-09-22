@@ -214,10 +214,10 @@ window.addEventListener('keyup', (e) => {
   if (TRACKED.has(key)) { held.delete(key); sendInput(); }
 });
 
-// Camera FOV zoom (45° to 120°): scrolled with mouse wheel when pointer locked.
+// Camera FOV zoom (45° to 85°): scrolled with mouse wheel when pointer locked.
 const BASE_FOV = 70;
 const MIN_FOV = 45;
-const MAX_FOV = 120;
+const MAX_FOV = 85;
 const FOV_STEP = 5;
 let targetFov = BASE_FOV;
 let currentBaseFov = BASE_FOV;
@@ -237,7 +237,7 @@ window.addEventListener('wheel', (e) => {
   }
 
   // Scroll up (deltaY < 0): zoom in -> smaller FOV (down to 45°)
-  // Scroll down (deltaY > 0): zoom out -> wider FOV (up to 120°)
+  // Scroll down (deltaY > 0): zoom out -> wider FOV (up to 85°)
   const delta = Math.abs(e.deltaY) >= 50
     ? Math.sign(e.deltaY) * FOV_STEP
     : (e.deltaY / 100) * FOV_STEP;
@@ -507,10 +507,7 @@ function renderJuice(juice) {
 // vision, not looked at.
 const vignetteEl = document.getElementById('vignette');
 const speedlinesEl = document.getElementById('speedlines');
-const FOV_GAIN = 6;        // degrees of extra FOV at full speed
-// Doubled with MAX_WISH in src/game/tuning.ts. These are absolute speeds, so
-// at the old values the FOV kick and vignette would sit pinned at full the
-// moment you touched W — the cue stops being a cue when it's always on.
+// Continuous: corners darken with speed. Triggered: a dash adds a brief contrast lift plus edge streaks.
 const SPEED_FX_LO = 20;    // units/s where the speed cue starts appearing
 const SPEED_FX_HI = 110;   // ...and where it's fully applied
 const VIGNETTE_MAX = 0.3;
@@ -531,18 +528,16 @@ function noteJuice(juice) {
 }
 
 function renderSpeedFx(camera, canvas, speed, dt) {
-  // Smoothly interpolate currentBaseFov towards targetFov for fluid zooming
-  currentBaseFov += (targetFov - currentBaseFov) * Math.min(1, dt * 15);
-
-  // smoothed: velocity is only patched in at the server's rate, and feeding
-  // that to the FOV raw makes it judder
-  const target = Math.min(1, Math.max(0, (speed - SPEED_FX_LO) / (SPEED_FX_HI - SPEED_FX_LO)));
-  speedFx += (target - speedFx) * Math.min(1, dt * 6);
-  const fov = currentBaseFov + FOV_GAIN * speedFx;
-  if (Math.abs(fov - camera.fov) > 0.01) {
-    camera.fov = fov;
+  // Smoothly interpolate currentBaseFov towards targetFov strictly driven by thumbwheel zoom
+  currentBaseFov += (targetFov - currentBaseFov) * Math.min(1, dt * 20);
+  if (Math.abs(currentBaseFov - camera.fov) > 0.01) {
+    camera.fov = currentBaseFov;
     camera.updateProjectionMatrix();
   }
+
+  // Speed cues: vignette and dash feedback only (no FOV distortion on acceleration)
+  const target = Math.min(1, Math.max(0, (speed - SPEED_FX_LO) / (SPEED_FX_HI - SPEED_FX_LO)));
+  speedFx += (target - speedFx) * Math.min(1, dt * 6);
   vignetteEl.style.opacity = (VIGNETTE_MAX * speedFx).toFixed(3);
 
   if (dashFx > 0) {
