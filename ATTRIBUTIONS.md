@@ -14,6 +14,14 @@ This project uses open-source audio, 3D models, and libraries. This file documen
 - **Attribution Statement**:
   > "Scifi Laser Gun Shooting" by TannerSound (https://freesound.org/s/843729/) is licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
 
+### 2. ShipEngine.mp3
+- **Title**: ShipEngine.mp3
+- **Author**: Beussa
+- **Source**: [https://freesound.org/s/659974/](https://freesound.org/s/659974/)
+- **License**: [Creative Commons 0 (CC0 1.0 Universal / Public Domain Dedication)](https://creativecommons.org/publicdomain/zero/1.0/)
+- **Attribution Statement**:
+  > "ShipEngine.mp3" by Beussa (https://freesound.org/s/659974/) is dedicated to the public domain under CC0 1.0.
+
 ---
 
 ## 🛠️ Third-Party Libraries & Tools
