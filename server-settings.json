@@ -1,7 +1,7 @@
 {
   "maxSpeed": 70,
-  "thrustAccel": 0.18,
-  "drag": 0.15,
+  "thrustAccel": 0.6,
+  "drag": 0.05,
   "dashImpulse": 38,
   "baseHull": 100,
   "botCount": 4,
