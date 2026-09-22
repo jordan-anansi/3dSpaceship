@@ -1388,11 +1388,12 @@ function syncUi(room) {
   const phase = state.phase;
   const inCombat = phase === 'combat';
 
-  // Engine sound begins at game start (lobby/combat) and runs uninterrupted until round ends (intermission/shop)
+  // Engine sound runs only when movement is allowed in the 3D world (combat phase),
+  // and stops when the round ends (intermission / shop / lobby).
   if (phase !== lastAudioPhase) {
-    if (phase === 'combat' || phase === 'lobby') {
+    if (phase === 'combat') {
       startEngineLoop();
-    } else if (phase === 'intermission' || phase === 'shop') {
+    } else {
       stopEngineLoop();
     }
     lastAudioPhase = phase;
@@ -1676,9 +1677,6 @@ async function startGame(room) {
   gridGroup.visible = false; // Turned off by default; press 'g' to toggle on
   scene.add(gridGroup);
   activeGrid = gridGroup;
-
-  // Start engine loop as soon as the 3D display begins
-  startEngineLoop();
 
   const distantStars = makeDistantStars();
   scene.add(distantStars);
