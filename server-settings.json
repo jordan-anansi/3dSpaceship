@@ -1,0 +1,12 @@
+{
+  "maxSpeed": 70,
+  "thrustAccel": 0.18,
+  "drag": 0.15,
+  "dashImpulse": 38,
+  "baseHull": 100,
+  "botCount": 4,
+  "enemyFireSounds": false,
+  "reticleCoolingColor": "#6ec387",
+  "reticleReadyColor": "#00ff66",
+  "explosionInheritVelocity": true
+}

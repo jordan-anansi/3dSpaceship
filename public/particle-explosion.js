@@ -195,6 +195,7 @@ const vertexShader = /* glsl */ `
   uniform float uSizeEnd;
   uniform float uSizePeakTime;
   uniform float uScale;
+  uniform vec3 uVelocity;
 
   attribute vec3 aVelocity;
   attribute float aLifespan;
@@ -219,7 +220,7 @@ const vertexShader = /* glsl */ `
     // Ballistic displacement with drag:
     // d(t) = v0 * (1 - exp(-drag * t)) / drag
     float disp = (uDrag > 0.001) ? (1.0 - exp(-uDrag * age)) / uDrag : age;
-    vec3 pos = aVelocity * disp;
+    vec3 localPos = aVelocity * disp;
 
     // Organic 3D turbulence (pseudo-curl sinusoidal noise)
     vec3 noise = vec3(
@@ -227,10 +228,13 @@ const vertexShader = /* glsl */ `
       cos(aSeed.y * 11.7 + age * uNoiseFreq * 1.1) * sin(aSeed.z * 8.4 + age * uNoiseFreq * 0.6),
       sin(aSeed.z * 13.1 + age * uNoiseFreq * 0.9) * cos(aSeed.x * 9.5 + age * uNoiseFreq * 0.8)
     );
-    pos += noise * (uTurbulence * p);
+    localPos += noise * (uTurbulence * p);
 
-    // Apply overall effect scale to 3D positions
-    pos *= uScale;
+    // Apply overall effect scale to 3D local positions
+    localPos *= uScale;
+
+    // Inherit downed ship's velocity at moment of destruction
+    vec3 pos = localPos + uVelocity * disp;
 
     // 3-point size curve (start -> peak -> end)
     float sz;
@@ -373,6 +377,11 @@ export function createExplosionSystem(options = {}) {
     uOpacityEnd: { value: config.opacityEnd },
     uOpacityPeakTime: { value: config.opacityPeakTime },
     uScale: { value: config.scale ?? 1.0 },
+    uVelocity: {
+      value: options.velocity
+        ? new THREE.Vector3(options.velocity.x || 0, options.velocity.y || 0, options.velocity.z || 0)
+        : new THREE.Vector3(0, 0, 0),
+    },
   };
 
   const material = new THREE.ShaderMaterial({
@@ -433,6 +442,9 @@ export function createExplosionSystem(options = {}) {
       u.uOpacityPeak.value = c.opacityPeak;
       u.uOpacityEnd.value = c.opacityEnd;
       u.uOpacityPeakTime.value = c.opacityPeakTime;
+      if (c.velocity) {
+        u.uVelocity.value.set(c.velocity.x || 0, c.velocity.y || 0, c.velocity.z || 0);
+      }
 
       system.material.blending = c.blending === 'normal'
         ? THREE.NormalBlending
@@ -526,9 +538,10 @@ export function setActiveExplosionConfig(config) {
 
 /**
  * Spawns a one-shot explosion at a specified world position (e.g. for in-game ship deaths).
+ * An optional velocity vector (e.g. from the downed ship) will be inherited by the particles.
  */
-export function spawnOneShotExplosion(scene, position, config) {
-  const system = createExplosionSystem({ ...config, autoLoop: false });
+export function spawnOneShotExplosion(scene, position, config, velocity) {
+  const system = createExplosionSystem({ ...config, autoLoop: false, velocity });
   system.points.position.copy(position);
   scene.add(system.points);
   system.trigger();

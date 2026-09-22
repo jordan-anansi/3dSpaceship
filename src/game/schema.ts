@@ -148,6 +148,10 @@ export class Blast extends Schema {
   @type('number') z: number = 0;
   @type('number') radius: number = 0;
   @type('number') spawnTick: number = 0;
+  // velocity of the exploding ship at moment of destruction
+  @type('number') vx: number = 0;
+  @type('number') vy: number = 0;
+  @type('number') vz: number = 0;
 }
 
 export class LobbyState extends Schema {
@@ -168,6 +172,12 @@ export class LobbyState extends Schema {
   @type('number') thrustAccel: number = THRUST_ACCEL;
   @type('number') dashImpulse: number = DASH_IMPULSE;
   @type('number') baseHull: number = BASE_HULL;
+
+  // --- hot-swappable gameplay & presentation settings ---
+  @type('boolean') enemyFireSounds: boolean = false;
+  @type('string') reticleCoolingColor: string = '#6ec387';
+  @type('string') reticleReadyColor: string = '#00ff66';
+  @type('boolean') explosionInheritVelocity: boolean = true;
 
   // --- round structure ---
   // 'lobby'        — free flight, waiting for someone to press Start

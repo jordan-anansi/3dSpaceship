@@ -89,9 +89,9 @@ export const ram: WeaponDef = {
 
   step(shot: Shot, id: string, ctx: StepContext) {
     const shooter = ctx.players.get(shot.shooter);
-    // Dying (or leaving) drops the dome. A field with no ship behind it would
-    // sit in space killing people for the rest of its second.
-    if (!shooter || !shooter.alive) {
+    // Leaving drops the dome. If the ship was destroyed, the active field
+    // continues its normal lifespan riding the drifting wreck.
+    if (!shooter) {
       ctx.deleteShot(id);
       return;
     }

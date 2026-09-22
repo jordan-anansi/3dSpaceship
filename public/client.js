@@ -117,8 +117,42 @@ const sendInput = () => currentRoom?.send('input', {
 const TRIGGER_REPEAT_MS = 60;
 const triggersDown = new Set();
 let triggerTimer = null;
+let lastMyFireTime = 0;
+
+function getWeaponCooldownMs(player, weaponId) {
+  switch (weaponId) {
+    case 'rail': {
+      const tier = player?.tech?.get ? (player.tech.get('railCycle') ?? 0) : 0;
+      return 1400 - 250 * tier;
+    }
+    case 'bolt': {
+      const tier = player?.tech?.get ? (player.tech.get('boltCadence') ?? 0) : 0;
+      return 300 - 60 * tier;
+    }
+    case 'flak':
+      return 800;
+    case 'ram':
+      return 5000;
+    default:
+      return 500;
+  }
+}
+
+function isWeaponReady(player) {
+  if (!player) return true;
+  const weaponId = player.weapon || 'rail';
+  if (weaponId === 'ram') {
+    if ((player.ramReadyTick ?? 0) > estimatedTick()) return false;
+  }
+  const cd = getWeaponCooldownMs(player, weaponId);
+  return (performance.now() - lastMyFireTime) >= cd;
+}
 
 const sendFire = () => {
+  const myPlayer = currentRoom?.state?.players?.get?.(currentRoom.sessionId);
+  if (myPlayer && isWeaponReady(myPlayer)) {
+    lastMyFireTime = performance.now();
+  }
   if (typeof flushLookBatch === 'function') flushLookBatch(performance.now());
   currentRoom?.send('fire', {
     // seq lets the server aim with exactly the orientation we predicted;
@@ -1827,6 +1861,9 @@ async function startGame(room) {
     const fx = SHOT_FX[shot.kind];
     if (!fx) return; // a weapon whose FX aren't implemented yet
     const mine = shot.shooter === room.sessionId;
+    if (mine) {
+      lastMyFireTime = performance.now();
+    }
     const origin = new THREE.Vector3(shot.ox, shot.oy, shot.oz);
     const built = fx.create({
       origin,
@@ -1844,7 +1881,11 @@ async function startGame(room) {
     // the server may have dropped the pull for cooldown, and a gun that
     // clicks when it didn't actually shoot teaches the wrong cadence. Our
     // own shots skip attenuation so they stay at the front of the mix.
-    playSound(shot.kind, mine ? undefined : camera.position.distanceTo(origin));
+    // Non-local fire audio respects the enemyFireSounds server setting (default false).
+    const playSoundForShot = mine || (room.state.enemyFireSounds ?? false);
+    if (playSoundForShot) {
+      playSound(shot.kind, mine ? undefined : camera.position.distanceTo(origin));
+    }
   });
 
   $(room.state).shots.onRemove((_shot, id) => {
@@ -1870,7 +1911,24 @@ async function startGame(room) {
 
     if (blast.kind === 'death') {
       const config = getActiveExplosionConfig();
-      const oneShot = spawnOneShotExplosion(scene, blastPos, config);
+      let vel = undefined;
+      if (room.state.explosionInheritVelocity !== false) {
+        vel = new THREE.Vector3(blast.vx || 0, blast.vy || 0, blast.vz || 0);
+        if (vel.lengthSq() === 0) {
+          // Fallback: search players for a downed player near the blast location
+          let bestDist = 25;
+          room.state.players?.forEach((p) => {
+            if (!p.alive) {
+              const d = blastPos.distanceTo(new THREE.Vector3(p.x, p.y, p.z));
+              if (d < bestDist) {
+                bestDist = d;
+                vel.set(p.vx, p.vy, p.vz);
+              }
+            }
+          });
+        }
+      }
+      const oneShot = spawnOneShotExplosion(scene, blastPos, config, vel);
       activeOneShots.add(oneShot);
       return;
     }
@@ -2066,6 +2124,18 @@ async function startGame(room) {
       speed = Math.hypot(myState.vx, myState.vy, myState.vz);
       ui.hud.textContent = `speed ${speed.toFixed(1)} · ${currentFps} FPS`;
       renderRoster(room.state.players, room.sessionId, listItems);
+
+      if (reticleEl) {
+        const ready = isWeaponReady(myState);
+        reticleEl.classList.toggle('ready', ready);
+        reticleEl.classList.toggle('cooling', !ready);
+        if (room.state.reticleCoolingColor) {
+          reticleEl.style.setProperty('--reticle-cooling-color', room.state.reticleCoolingColor);
+        }
+        if (room.state.reticleReadyColor) {
+          reticleEl.style.setProperty('--reticle-ready-color', room.state.reticleReadyColor);
+        }
+      }
     } else {
       ui.hud.textContent = `speed 0.0 · ${currentFps} FPS`;
     }

@@ -4,6 +4,8 @@ import { Quaternion, Vector3 } from 'three';
 import { Bots } from '../game/bots';
 import { tierOf } from '../game/catalog';
 import { Blast, LobbyState, Player, Shot } from '../game/schema';
+import { loadServerSettings, saveServerSettings, watchServerSettingsFile } from '../game/settings';
+import type { ServerSettings } from '../game/settings';
 import { applyStats, buy, drawOffer, skip, statsFor } from '../game/upgrades';
 import { WEAPONS, defaultWeapon, weaponFor } from '../game/weapons';
 import type { Hit, StepContext, SweepOpts } from '../game/weapons';
@@ -127,6 +129,7 @@ export class LobbyRoom extends Room<LobbyState> {
   // itself is instantaneous, so this is the only state it leaves behind.
   private dashFalloff = new Map<string, number>();
   private bots = new Bots();
+  private stopSettingsWatcher?: () => void;
 
   onCreate() {
     this.setState(new LobbyState());
@@ -134,54 +137,35 @@ export class LobbyRoom extends Room<LobbyState> {
     // Matches server simulation rate and eliminates coarse 50ms network jumps.
     this.setPatchRate(1000 / 60);
 
-    this.onMessage('setServerSettings', (_client, settings: Partial<{
-      maxSpeed: number;
-      thrustAccel: number;
-      drag: number;
-      dashImpulse: number;
-      baseHull: number;
-      botCount: number;
-    }>) => {
+    // Load initial settings from server-settings.json on disk
+    this.applySettingsToState(loadServerSettings());
+
+    // Watch for external edits to server-settings.json and hot-reload them
+    this.stopSettingsWatcher = watchServerSettingsFile((reloaded) => {
+      this.applySettingsToState(reloaded);
+    });
+
+    this.onMessage('setServerSettings', (_client, settings: Partial<ServerSettings>) => {
       if (!settings || typeof settings !== 'object') return;
-      if (typeof settings.maxSpeed === 'number' && Number.isFinite(settings.maxSpeed)) {
-        this.state.maxSpeed = Math.max(10, Math.min(500, settings.maxSpeed));
-      }
-      if (typeof settings.thrustAccel === 'number' && Number.isFinite(settings.thrustAccel)) {
-        this.state.thrustAccel = Math.max(0.01, Math.min(5.0, settings.thrustAccel));
-      }
-      if (typeof settings.drag === 'number' && Number.isFinite(settings.drag)) {
-        this.state.drag = Math.max(0, Math.min(5, settings.drag));
-      }
-      if (typeof settings.dashImpulse === 'number' && Number.isFinite(settings.dashImpulse)) {
-        this.state.dashImpulse = Math.max(5, Math.min(300, settings.dashImpulse));
-      }
-      if (typeof settings.baseHull === 'number' && Number.isFinite(settings.baseHull)) {
-        const newHull = Math.max(10, Math.min(1000, Math.round(settings.baseHull)));
-        const oldHull = this.state.baseHull;
-        this.state.baseHull = newHull;
-        if (newHull !== oldHull) {
-          this.state.players.forEach((p) => {
-            if (!p.godMode) {
-              const prevMax = p.maxHull;
-              const ratio = p.hull / (prevMax || 1);
-              applyStats(p, this.state);
-              p.hull = Math.max(1, Math.round(p.maxHull * ratio));
-            }
-          });
-        }
-      }
-      if (typeof settings.botCount === 'number' && Number.isFinite(settings.botCount)) {
-        this.state.botCount = Math.max(0, Math.min(8, Math.round(settings.botCount)));
-        if (this.state.phase === 'combat') {
-          this.bots.sync(
-            this.state.players,
-            this.state.botCount,
-            Math.max(BOT_MAX, this.state.botCount),
-            this.state.round
-          );
-        }
-      }
-      console.log(`[lobby] updated serverSettings: maxSpeed=${this.state.maxSpeed}, thrustAccel=${this.state.thrustAccel}, drag=${this.state.drag}, dashImpulse=${this.state.dashImpulse}, baseHull=${this.state.baseHull}, botCount=${this.state.botCount}`);
+      this.applySettingsToState(settings);
+    });
+
+    this.onMessage('promoteServerSettings', (client) => {
+      const current: ServerSettings = {
+        maxSpeed: this.state.maxSpeed,
+        thrustAccel: this.state.thrustAccel,
+        drag: this.state.drag,
+        dashImpulse: this.state.dashImpulse,
+        baseHull: this.state.baseHull,
+        botCount: this.state.botCount,
+        enemyFireSounds: this.state.enemyFireSounds,
+        reticleCoolingColor: this.state.reticleCoolingColor,
+        reticleReadyColor: this.state.reticleReadyColor,
+        explosionInheritVelocity: this.state.explosionInheritVelocity,
+      };
+      saveServerSettings(current);
+      client.send('serverSettingsPromoted', { timestamp: Date.now() });
+      console.log(`[lobby] client ${client.sessionId} promoted server settings to defaults`);
     });
 
     this.onMessage('setDrag', (_client, value: unknown) => {
@@ -308,6 +292,60 @@ export class LobbyRoom extends Room<LobbyState> {
     });
 
     this.setSimulationInterval((dtMs) => this.update(dtMs / 1000));
+  }
+
+  private applySettingsToState(settings: Partial<ServerSettings>) {
+    if (typeof settings.maxSpeed === 'number' && Number.isFinite(settings.maxSpeed)) {
+      this.state.maxSpeed = Math.max(10, Math.min(500, settings.maxSpeed));
+    }
+    if (typeof settings.thrustAccel === 'number' && Number.isFinite(settings.thrustAccel)) {
+      this.state.thrustAccel = Math.max(0.01, Math.min(5.0, settings.thrustAccel));
+    }
+    if (typeof settings.drag === 'number' && Number.isFinite(settings.drag)) {
+      this.state.drag = Math.max(0, Math.min(5, settings.drag));
+    }
+    if (typeof settings.dashImpulse === 'number' && Number.isFinite(settings.dashImpulse)) {
+      this.state.dashImpulse = Math.max(5, Math.min(300, settings.dashImpulse));
+    }
+    if (typeof settings.baseHull === 'number' && Number.isFinite(settings.baseHull)) {
+      const newHull = Math.max(10, Math.min(1000, Math.round(settings.baseHull)));
+      const oldHull = this.state.baseHull;
+      this.state.baseHull = newHull;
+      if (newHull !== oldHull) {
+        this.state.players.forEach((p) => {
+          if (!p.godMode) {
+            const prevMax = p.maxHull;
+            const ratio = p.hull / (prevMax || 1);
+            applyStats(p, this.state);
+            p.hull = Math.max(1, Math.round(p.maxHull * ratio));
+          }
+        });
+      }
+    }
+    if (typeof settings.botCount === 'number' && Number.isFinite(settings.botCount)) {
+      this.state.botCount = Math.max(0, Math.min(8, Math.round(settings.botCount)));
+      if (this.state.phase === 'combat') {
+        this.bots.sync(
+          this.state.players,
+          this.state.botCount,
+          Math.max(BOT_MAX, this.state.botCount),
+          this.state.round
+        );
+      }
+    }
+    if (typeof settings.enemyFireSounds === 'boolean') {
+      this.state.enemyFireSounds = settings.enemyFireSounds;
+    }
+    if (typeof settings.reticleCoolingColor === 'string' && settings.reticleCoolingColor) {
+      this.state.reticleCoolingColor = settings.reticleCoolingColor;
+    }
+    if (typeof settings.reticleReadyColor === 'string' && settings.reticleReadyColor) {
+      this.state.reticleReadyColor = settings.reticleReadyColor;
+    }
+    if (typeof settings.explosionInheritVelocity === 'boolean') {
+      this.state.explosionInheritVelocity = settings.explosionInheritVelocity;
+    }
+    console.log(`[lobby] active serverSettings: maxSpeed=${this.state.maxSpeed}, thrustAccel=${this.state.thrustAccel}, drag=${this.state.drag}, dashImpulse=${this.state.dashImpulse}, baseHull=${this.state.baseHull}, botCount=${this.state.botCount}, enemyFireSounds=${this.state.enemyFireSounds}, reticleCooling=${this.state.reticleCoolingColor}, reticleReady=${this.state.reticleReadyColor}, expInheritVel=${this.state.explosionInheritVelocity}`);
   }
 
   // ---------------------------------------------------------------- phases
@@ -602,7 +640,13 @@ export class LobbyRoom extends Room<LobbyState> {
     victim.respawnTick = this.state.tick + this.secondsToTicks(RESPAWN_DELAY_SEC);
     // The wreck keeps drifting server-side but stops being drawn, so without
     // something at the moment of death a ship just blinks out. Cosmetic only.
-    this.spawnBlast(new Vector3(victim.x, victim.y, victim.z), DEATH_BLAST_RADIUS, 'death');
+    // Velocity is passed so particles start with the downed ship's momentum.
+    this.spawnBlast(
+      new Vector3(victim.x, victim.y, victim.z),
+      DEATH_BLAST_RADIUS,
+      'death',
+      new Vector3(victim.vx, victim.vy, victim.vz)
+    );
     if (shooter) {
       shooter.kills += 1;
       if (!shooter.isBot) {
@@ -725,12 +769,17 @@ export class LobbyRoom extends Room<LobbyState> {
     return id;
   }
 
-  private spawnBlast(pos: Vector3, radius: number, kind = 'burst') {
+  private spawnBlast(pos: Vector3, radius: number, kind = 'burst', vel?: Vector3) {
     const blast = new Blast();
     blast.kind = kind;
     blast.x = pos.x; blast.y = pos.y; blast.z = pos.z;
     blast.radius = radius;
     blast.spawnTick = this.state.tick;
+    if (vel) {
+      blast.vx = vel.x;
+      blast.vy = vel.y;
+      blast.vz = vel.z;
+    }
     this.state.blasts.set(`b${this.blastCounter++}`, blast);
   }
 
@@ -1001,4 +1050,9 @@ export class LobbyRoom extends Room<LobbyState> {
       console.log('[lobby] room empty — run reset');
     }
   }
+
+  onDispose() {
+    this.stopSettingsWatcher?.();
+  }
 }
+

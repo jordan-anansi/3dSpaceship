@@ -52,9 +52,23 @@
     #reticle {
       position: absolute; left: 50%; top: 50%; width: 20px; height: 20px;
       transform: translate(-50%, -50%); pointer-events: none;
+      --reticle-cooling-color: #6ec387;
+      --reticle-ready-color: #00ff66;
     }
     #reticle::before, #reticle::after {
-      content: ''; position: absolute; background: rgba(0, 255, 102, 0.8);
+      content: ''; position: absolute;
+      background: var(--reticle-ready-color, #00ff66);
+      transition: background 0.08s ease, filter 0.08s ease, opacity 0.08s ease;
+    }
+    #reticle.cooling::before, #reticle.cooling::after {
+      background: var(--reticle-cooling-color, #6ec387);
+      opacity: 0.55;
+      filter: none;
+    }
+    #reticle.ready::before, #reticle.ready::after {
+      background: var(--reticle-ready-color, #00ff66);
+      opacity: 1.0;
+      filter: drop-shadow(0 0 3px var(--reticle-ready-color, #00ff66));
     }
     #reticle::before { left: 0; right: 0; top: 9px; height: 2px;
       -webkit-mask: linear-gradient(90deg, #000 35%, transparent 35% 65%, #000 65%);
