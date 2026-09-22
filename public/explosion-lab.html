@@ -1,0 +1,878 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>3dSpaceship &mdash; Explosion Lab</title>
+  <style>
+    :root {
+      --bg: #070a14;
+      --panel: #0d1324;
+      --card: #121a30;
+      --line: #1e2846;
+      --line-active: #3a4b7c;
+      --ink: #e2e8f8;
+      --dim: #7785aa;
+      --neon-orange: #ffaa33;
+      --neon-cyan: #00e5ff;
+      --neon-green: #00ff66;
+      --neon-pink: #ff3377;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: 'Consolas', 'Courier New', monospace;
+      overflow: hidden;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      background: rgba(13, 19, 36, 0.95);
+      border-bottom: 1px solid var(--line);
+      padding: 0.5rem 1rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      z-index: 10;
+      flex-shrink: 0;
+    }
+
+    .title-group {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .icon-logo {
+      font-size: 1.5rem;
+      text-shadow: 0 0 10px rgba(255, 170, 51, 0.6);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 1.15rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #fff;
+    }
+
+    .nav-links {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+    }
+
+    .nav-btn {
+      text-decoration: none;
+      font-size: 0.75rem;
+      padding: 0.35rem 0.7rem;
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      color: var(--neon-cyan);
+      transition: all 0.15s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+    }
+    .nav-btn:hover {
+      border-color: var(--neon-cyan);
+      box-shadow: 0 0 8px rgba(0, 229, 255, 0.3);
+    }
+
+    #workspace {
+      position: relative;
+      flex: 1;
+      width: 100%;
+      height: calc(100vh - 50px);
+      overflow: hidden;
+    }
+
+    #viewport {
+      width: 100%;
+      height: 100%;
+      display: block;
+      background: #000;
+    }
+
+    /* Orbit help banner */
+    #orbit-hint {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: rgba(13, 19, 36, 0.85);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 0.35rem 0.75rem;
+      font-size: 0.72rem;
+      color: var(--dim);
+      pointer-events: none;
+      z-index: 5;
+    }
+    #orbit-hint kbd {
+      color: #fff;
+      background: rgba(255, 255, 255, 0.15);
+      padding: 1px 4px;
+      border-radius: 3px;
+    }
+
+    /* Dashboard floating controls */
+    #lab-dock {
+      position: absolute;
+      bottom: 12px;
+      left: 12px;
+      right: 12px;
+      max-height: 290px;
+      background: rgba(11, 15, 28, 0.94);
+      border: 1px solid var(--line);
+      border-top: 2px solid var(--neon-orange);
+      border-radius: 6px;
+      padding: 0.75rem 1rem;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.75);
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+      z-index: 10;
+      overflow-y: auto;
+    }
+
+    .exp-bar {
+      display: flex;
+      gap: 0.6rem;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      padding-bottom: 0.5rem;
+    }
+
+    .exp-presets {
+      display: flex;
+      gap: 0.4rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    select, button, input[type=text] {
+      font-family: inherit;
+      font-size: 0.75rem;
+      padding: 0.25rem 0.5rem;
+      border-radius: 3px;
+      border: 1px solid var(--line);
+      background: var(--card);
+      color: var(--ink);
+    }
+    select:focus, input[type=text]:focus {
+      outline: none;
+      border-color: var(--neon-orange);
+    }
+    button {
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    button:hover:not(:disabled) {
+      border-color: var(--neon-orange);
+      color: var(--neon-orange);
+    }
+    button:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    .exp-quick-btn {
+      padding: 0.2rem 0.45rem;
+      font-size: 0.85rem;
+    }
+
+    .exp-playback {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .apply-game-btn {
+      background: rgba(0, 255, 102, 0.12) !important;
+      border-color: var(--neon-green) !important;
+      color: var(--neon-green) !important;
+      font-weight: bold;
+    }
+    .apply-game-btn:hover {
+      box-shadow: 0 0 10px rgba(0, 255, 102, 0.4);
+    }
+
+    .exp-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 1rem;
+    }
+
+    .exp-col {
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+    }
+
+    .exp-col-title {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--neon-orange);
+      border-bottom: 1px solid rgba(255, 170, 51, 0.3);
+      padding-bottom: 2px;
+      margin-bottom: 2px;
+      font-weight: bold;
+    }
+
+    .exp-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .exp-row label {
+      color: var(--dim);
+      font-size: 0.72rem;
+      white-space: nowrap;
+    }
+    .exp-row .val {
+      color: var(--ink);
+      min-width: 36px;
+      text-align: right;
+      font-size: 0.72rem;
+      font-weight: 500;
+    }
+    .exp-row input[type=range] {
+      flex: 1;
+      max-width: 90px;
+      height: 5px;
+      accent-color: var(--neon-orange);
+      cursor: pointer;
+    }
+    .exp-row input[type=color] {
+      width: 32px;
+      height: 20px;
+      border: 1px solid var(--line);
+      background: none;
+      cursor: pointer;
+      padding: 0;
+    }
+
+    #status-toast {
+      color: var(--neon-green);
+      font-size: 0.72rem;
+      font-weight: bold;
+      min-width: 80px;
+      transition: opacity 0.3s;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="title-group">
+      <span class="icon-logo">💥</span>
+      <div>
+        <h1>Explosion Lab</h1>
+      </div>
+    </div>
+
+    <div class="nav-links">
+      <a href="/" target="_blank" class="nav-btn" title="Open Game View">🚀 Return to Game</a>
+      <a href="/settings.html" target="_blank" class="nav-btn" title="Open Server Settings">⚙️ Server Settings</a>
+    </div>
+  </header>
+
+  <div id="workspace">
+    <canvas id="viewport"></canvas>
+
+    <div id="orbit-hint">
+      <span>🖱️ Left-Click + Drag: Orbit &middot; Right-Click: Pan &middot; Scroll: Zoom</span>
+    </div>
+
+    <div id="lab-dock">
+      <!-- Top Preset & Playback Bar -->
+      <div class="exp-bar">
+        <div class="exp-presets">
+          <strong style="color: var(--neon-orange); font-size: 0.75rem;">PRESET:</strong>
+          <select id="exp-preset-select" title="Choose from built-in or custom saved presets">
+            <optgroup label="Built-in Presets" id="exp-builtin-opts">
+              <option value="shipkill" selected>🚀 Ship Demise (Default)</option>
+              <option value="fireball">🔥 Nova Fireball</option>
+              <option value="plasma">⚡ Plasma Shockwave</option>
+              <option value="shrapnel">✨ Sparks & Shrapnel</option>
+              <option value="smoke">💨 Dark Ash & Smoke</option>
+            </optgroup>
+            <optgroup label="Custom Presets" id="exp-custom-opts"></optgroup>
+          </select>
+          <button type="button" data-preset="shipkill" class="exp-quick-btn" title="Ship Demise">🚀</button>
+          <button type="button" data-preset="fireball" class="exp-quick-btn" title="Nova Fireball">🔥</button>
+          <button type="button" data-preset="plasma" class="exp-quick-btn" title="Plasma Shockwave">⚡</button>
+          <button type="button" data-preset="shrapnel" class="exp-quick-btn" title="Sparks & Shrapnel">✨</button>
+          <button type="button" data-preset="smoke" class="exp-quick-btn" title="Dark Ash & Smoke">💨</button>
+
+          <input id="exp-preset-name" type="text" placeholder="Preset name" maxlength="24" autocomplete="off" style="width: 100px;" />
+          <button id="exp-save-btn" type="button" title="Save current settings as a new custom preset">💾 Save</button>
+          <button id="exp-delete-btn" type="button" title="Delete current custom preset" disabled>🗑 Del</button>
+          <button id="exp-copy-json-btn" type="button" title="Copy preset JSON to clipboard">📋 JSON</button>
+        </div>
+
+        <div class="exp-playback">
+          <button id="exp-save-in-game-btn" type="button" class="apply-game-btn" title="Set this explosion as default for all ship deaths in game">
+            ✅ Set as In-Game Default
+          </button>
+          <label style="display: flex; align-items: center; gap: 0.3rem; font-size: 0.72rem; color: var(--neon-cyan); cursor: pointer;">
+            <input id="exp-show-scale-ship" type="checkbox" checked /> Ship Scale (4.4u)
+          </label>
+          <select id="exp-scale-ship-mode" title="Position of reference ship">
+            <option value="both" selected>Center & Beside</option>
+            <option value="epicenter">Center Only</option>
+            <option value="beside">Beside Only</option>
+          </select>
+          <button id="exp-play-pause" type="button">⏸ Pause</button>
+          <button id="exp-trigger" type="button">⚡ Replay</button>
+          <button id="exp-reset-cam" type="button" title="Reset camera to front-center view">🎯 Reset Cam</button>
+          <span id="status-toast"></span>
+        </div>
+      </div>
+
+      <!-- Controls Grid -->
+      <div class="exp-grid">
+        <!-- Col 1: Dynamics -->
+        <div class="exp-col">
+          <div class="exp-col-title">Dynamics & Emitter</div>
+          <div class="exp-row" style="background: rgba(255, 170, 51, 0.12); border: 1px solid rgba(255, 170, 51, 0.3); border-radius: 3px; padding: 2px 6px;">
+            <span style="color: #ffaa33; font-size: 0.68rem; font-weight: 600;">Est. Max Radius:</span>
+            <span id="exp-blast-size-val" style="color: #ffcc66; font-size: 0.68rem; font-weight: bold;">~7.4u (1.7× ship)</span>
+          </div>
+          <div class="exp-row" style="background: rgba(0, 229, 255, 0.1); border: 1px solid rgba(0, 229, 255, 0.35); border-radius: 3px; padding: 2px 6px;">
+            <label for="exp-scale" style="color: var(--neon-cyan); font-weight: bold;">Overall Scale</label>
+            <input id="exp-scale" type="range" min="0.05" max="3.0" step="0.05" value="0.15" style="accent-color: var(--neon-cyan);" />
+            <span id="exp-scale-val" class="val" style="color: var(--neon-cyan); font-weight: bold;">0.15x</span>
+          </div>
+          <div class="exp-row">
+            <label for="exp-count">Count</label>
+            <input id="exp-count" type="range" min="50" max="2000" step="50" value="900" />
+            <span id="exp-count-val" class="val">900</span>
+          </div>
+          <div class="exp-row">
+            <label for="exp-life">Lifespan</label>
+            <input id="exp-life" type="range" min="0.2" max="3.0" step="0.05" value="0.85" />
+            <span id="exp-life-val" class="val">0.85s</span>
+          </div>
+          <div class="exp-row">
+            <label for="exp-life-var">Life Var</label>
+            <input id="exp-life-var" type="range" min="0" max="1" step="0.05" value="0.25" />
+            <span id="exp-life-var-val" class="val">25%</span>
+          </div>
+          <div class="exp-row">
+            <label for="exp-speed">Speed</label>
+            <input id="exp-speed" type="range" min="5" max="150" step="1" value="90" />
+            <span id="exp-speed-val" class="val">90</span>
+          </div>
+          <div class="exp-row">
+            <label for="exp-speed-var">Spd Var</label>
+            <input id="exp-speed-var" type="range" min="0" max="1" step="0.05" value="0.40" />
+            <span id="exp-speed-var-val" class="val">40%</span>
+          </div>
+          <div class="exp-row">
+            <label for="exp-drag">Drag</label>
+            <input id="exp-drag" type="range" min="0" max="4.0" step="0.05" value="1.20" />
+            <span id="exp-drag-val" class="val">1.20</span>
+          </div>
+          <div class="exp-row">
+            <label for="exp-turb">Turbulence</label>
+            <input id="exp-turb" type="range" min="0" max="10" step="0.1" value="2.2" />
+            <span id="exp-turb-val" class="val">2.2</span>
+          </div>
+          <div class="exp-row">
+            <label for="exp-noise">Noise Freq</label>
+            <input id="exp-noise" type="range" min="0.5" max="8.0" step="0.1" value="3.5" />
+            <span id="exp-noise-val" class="val">3.5</span>
+          </div>
+        </div>
+
+        <!-- Col 2: Size & Opacity -->
+        <div class="exp-col">
+          <div class="exp-col-title">Size & Opacity Over Life</div>
+          <div class="exp-row">
+            <label for="exp-sz-start">Start Size</label>
+            <input id="exp-sz-start" type="range" min="0.5" max="15" step="0.5" value="4.0" />
+            <span id="exp-sz-start-val" class="val">4.0</span>
+          </div>
+          <div class="exp-row">
+            <label for="exp-sz-peak">Peak Size</label>
+            <input id="exp-sz-peak" type="range" min="1" max="40" step="0.5" value="22.0" />
+            <span id="exp-sz-peak-val" class="val">22.0</span>
+          </div>
+          <div class="exp-row">
+            <label for="exp-sz-end">End Size</label>
+            <input id="exp-sz-end" type="range" min="0" max="30" step="0.5" value="0.5" />
+            <span id="exp-sz-end-val" class="val">0.5</span>
+          </div>
+          <div class="exp-row">
+            <label for="exp-sz-time">Peak Time</label>
+            <input id="exp-sz-time" type="range" min="0.05" max="0.9" step="0.05" value="0.18" />
+            <span id="exp-sz-time-val" class="val">18%</span>
+          </div>
+          <div class="exp-row">
+            <label for="exp-op-start">Start Alpha</label>
+            <input id="exp-op-start" type="range" min="0" max="1" step="0.05" value="1.0" />
+            <span id="exp-op-start-val" class="val">1.00</span>
+          </div>
+          <div class="exp-row">
+            <label for="exp-op-peak">Peak Alpha</label>
+            <input id="exp-op-peak" type="range" min="0" max="1" step="0.05" value="1.0" />
+            <span id="exp-op-peak-val" class="val">1.00</span>
+          </div>
+          <div class="exp-row">
+            <label for="exp-op-end">End Alpha</label>
+            <input id="exp-op-end" type="range" min="0" max="1" step="0.05" value="0.0" />
+            <span id="exp-op-end-val" class="val">0.00</span>
+          </div>
+          <div class="exp-row">
+            <label for="exp-blend">Blending</label>
+            <select id="exp-blend">
+              <option value="additive" selected>Additive (Glow)</option>
+              <option value="normal">Normal (Alpha)</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Col 3: Color & Playback -->
+        <div class="exp-col">
+          <div class="exp-col-title">Color & Timing</div>
+          <div class="exp-row">
+            <label for="exp-col-start">Core Flash</label>
+            <input id="exp-col-start" type="color" value="#f0ffff" />
+          </div>
+          <div class="exp-row">
+            <label for="exp-col-mid">Mid Burst</label>
+            <input id="exp-col-mid" type="color" value="#00ddff" />
+          </div>
+          <div class="exp-row">
+            <label for="exp-col-end">End Smoke</label>
+            <input id="exp-col-end" type="color" value="#7700ff" />
+          </div>
+          <div class="exp-row">
+            <label for="exp-col-time">Mid Timing</label>
+            <input id="exp-col-time" type="range" min="0.1" max="0.9" step="0.05" value="0.35" />
+            <span id="exp-col-time-val" class="val">35%</span>
+          </div>
+          <div class="exp-row">
+            <label for="exp-loop">Loop Interval</label>
+            <input id="exp-loop" type="range" min="0.5" max="4.0" step="0.1" value="1.3" />
+            <span id="exp-loop-val" class="val">1.3s</span>
+          </div>
+          <div class="exp-row">
+            <label for="exp-speed-scale">Slow-Mo</label>
+            <input id="exp-speed-scale" type="range" min="0.05" max="2.0" step="0.05" value="1.0" />
+            <span id="exp-speed-scale-val" class="val">1.0x</span>
+          </div>
+          <div class="exp-row" style="margin-top: 4px;">
+            <label style="cursor: pointer; display: flex; align-items: center; gap: 0.3rem; color: #fff;">
+              <input id="exp-autoloop" type="checkbox" checked /> Repeat Explosion
+            </label>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="importmap">
+    { "imports": {
+      "three": "/lib/three/three.module.js",
+      "three/addons/": "/lib/three-addons/"
+    } }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import {
+      createExplosionSystem,
+      DEFAULT_EXPLOSION_CONFIG,
+      EXPLOSION_PRESETS,
+      loadUserPresets,
+      saveUserPreset,
+      deleteUserPreset,
+      getAllPresets,
+      getActiveExplosionConfig,
+      setActiveExplosionConfig,
+    } from './particle-explosion.js';
+
+    const canvas = document.getElementById('viewport');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setSize(canvas.clientWidth, canvas.clientHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x050811);
+
+    const camera = new THREE.PerspectiveCamera(60, canvas.clientWidth / canvas.clientHeight, 0.1, 1000);
+    camera.position.set(0, 3, 14);
+
+    const controls = new OrbitControls(camera, canvas);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    controls.target.set(0, 0, 0);
+
+    // Scene Lighting
+    const ambientLight = new THREE.AmbientLight(0x223355, 1.2);
+    scene.add(ambientLight);
+
+    const sunLight = new THREE.DirectionalLight(0xffffff, 2.0);
+    sunLight.position.set(20, 40, 30);
+    scene.add(sunLight);
+
+    const fillLight = new THREE.DirectionalLight(0x4466aa, 1.0);
+    fillLight.position.set(-20, -20, -20);
+    scene.add(fillLight);
+
+    // Starfield background
+    const starsGeo = new THREE.BufferGeometry();
+    const starCount = 1200;
+    const starPos = new Float32Array(starCount * 3);
+    for (let i = 0; i < starCount * 3; i += 3) {
+      starPos[i] = (Math.random() - 0.5) * 400;
+      starPos[i + 1] = (Math.random() - 0.5) * 400;
+      starPos[i + 2] = (Math.random() - 0.5) * 400;
+    }
+    starsGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+    const starsMat = new THREE.PointsMaterial({ color: 0x88aacc, size: 1.2, sizeAttenuation: false });
+    scene.add(new THREE.Points(starsGeo, starsMat));
+
+    // Reference Ships
+    const SHIP_LENGTH = 4.4;
+    const scaleShipGroup = new THREE.Group();
+    scene.add(scaleShipGroup);
+
+    let centerScaleShip = null;
+    let besideScaleShip = null;
+    let scaleShipMode = 'both';
+    let showScaleShip = true;
+
+    new GLTFLoader().loadAsync('/models/orion.glb')
+      .then((gltf) => {
+        const model = gltf.scene;
+        model.traverse((o) => {
+          if (!o.isMesh) return;
+          o.material.side = THREE.DoubleSide;
+          if (o.material.emissive) {
+            o.material.emissive = new THREE.Color(0x000000);
+            o.material.emissiveIntensity = 0;
+          }
+        });
+        const box = new THREE.Box3().setFromObject(model);
+        const size = box.getSize(new THREE.Vector3());
+        const center = box.getCenter(new THREE.Vector3());
+        model.position.copy(center).multiplyScalar(-1);
+
+        const norm = new THREE.Group();
+        norm.rotation.y = Math.PI;
+        norm.scale.setScalar(SHIP_LENGTH / size.z);
+        norm.add(model);
+
+        centerScaleShip = norm.clone();
+        besideScaleShip = norm.clone();
+        besideScaleShip.position.set(5.5, 0, 0);
+
+        scaleShipGroup.add(centerScaleShip);
+        scaleShipGroup.add(besideScaleShip);
+      })
+      .catch((err) => {
+        console.warn('Orion GLB failed to load in lab, using fallback model', err);
+        const geom = new THREE.ConeGeometry(0.8, SHIP_LENGTH, 5);
+        geom.rotateX(Math.PI / 2);
+        const mat = new THREE.MeshStandardMaterial({ color: 0x5588cc, roughness: 0.4 });
+        centerScaleShip = new THREE.Mesh(geom, mat);
+        besideScaleShip = new THREE.Mesh(geom, mat);
+        besideScaleShip.position.set(5.5, 0, 0);
+        scaleShipGroup.add(centerScaleShip);
+        scaleShipGroup.add(besideScaleShip);
+      });
+
+    // Particle Explosion System
+    const initialConfig = getActiveExplosionConfig();
+    let expSystem = createExplosionSystem(initialConfig);
+    expSystem.points.position.set(0, 0, 0);
+    scene.add(expSystem.points);
+
+    // Blast size indicator
+    function updateBlastSizeReadout() {
+      const badge = document.getElementById('exp-blast-size-val');
+      if (!badge || !expSystem) return;
+      const c = expSystem.config;
+      const speed = c.speed || 18;
+      const drag = c.drag || 2.2;
+      const life = c.lifespan || 1.1;
+      const scale = c.scale ?? 1.0;
+      const radius = ((drag > 0.001) ? (speed / drag) * (1 - Math.exp(-drag * life)) : speed * life) * scale;
+      const ratio = radius / SHIP_LENGTH;
+      badge.textContent = `~${radius.toFixed(1)}u (${ratio.toFixed(1)}× ship)`;
+    }
+
+    // Status toast
+    const statusToast = document.getElementById('status-toast');
+    let toastTimer = null;
+    function showToast(msg) {
+      if (!statusToast) return;
+      statusToast.textContent = msg;
+      statusToast.style.opacity = '1';
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { statusToast.style.opacity = '0'; }, 2000);
+    }
+
+    // Bind UI elements
+    const getEl = (id) => document.getElementById(id);
+
+    function setVal(id, val, valId, fmt) {
+      const el = getEl(id);
+      if (el) el.value = val;
+      const vel = getEl(valId);
+      if (vel && fmt) vel.textContent = fmt(val);
+    }
+
+    function bind(id, valId, fmt, onChange) {
+      const el = getEl(id);
+      const valEl = getEl(valId);
+      if (!el) return;
+      const handler = () => {
+        const v = parseFloat(el.value);
+        if (valEl && fmt) valEl.textContent = fmt(v);
+        if (expSystem) {
+          onChange(v);
+          updateBlastSizeReadout();
+        }
+      };
+      el.addEventListener('input', handler);
+      el.addEventListener('change', handler);
+    }
+
+    // Sliders & inputs
+    bind('exp-scale', 'exp-scale-val', (v) => `${v.toFixed(2)}x`, (v) => expSystem?.updateUniforms({ scale: v }));
+    bind('exp-count', 'exp-count-val', (v) => `${Math.round(v)}`, (v) => expSystem?.rebuild({ count: Math.round(v) }));
+    bind('exp-life', 'exp-life-val', (v) => `${v.toFixed(2)}s`, (v) => expSystem?.rebuild({ lifespan: v }));
+    bind('exp-life-var', 'exp-life-var-val', (v) => `${Math.round(v * 100)}%`, (v) => expSystem?.rebuild({ lifespanVariance: v }));
+    bind('exp-speed', 'exp-speed-val', (v) => `${Math.round(v)}`, (v) => expSystem?.rebuild({ speed: v }));
+    bind('exp-speed-var', 'exp-speed-var-val', (v) => `${Math.round(v * 100)}%`, (v) => expSystem?.rebuild({ speedVariance: v }));
+    bind('exp-drag', 'exp-drag-val', (v) => `${v.toFixed(2)}`, (v) => expSystem?.updateUniforms({ drag: v }));
+    bind('exp-turb', 'exp-turb-val', (v) => `${v.toFixed(1)}`, (v) => expSystem?.updateUniforms({ turbulence: v }));
+    bind('exp-noise', 'exp-noise-val', (v) => `${v.toFixed(1)}`, (v) => expSystem?.updateUniforms({ noiseFreq: v }));
+
+    bind('exp-sz-start', 'exp-sz-start-val', (v) => `${v.toFixed(1)}`, (v) => expSystem?.updateUniforms({ sizeStart: v }));
+    bind('exp-sz-peak', 'exp-sz-peak-val', (v) => `${v.toFixed(1)}`, (v) => expSystem?.updateUniforms({ sizePeak: v }));
+    bind('exp-sz-end', 'exp-sz-end-val', (v) => `${v.toFixed(1)}`, (v) => expSystem?.updateUniforms({ sizeEnd: v }));
+    bind('exp-sz-time', 'exp-sz-time-val', (v) => `${Math.round(v * 100)}%`, (v) => expSystem?.updateUniforms({ sizePeakTime: v }));
+
+    bind('exp-op-start', 'exp-op-start-val', (v) => `${v.toFixed(2)}`, (v) => expSystem?.updateUniforms({ opacityStart: v }));
+    bind('exp-op-peak', 'exp-op-peak-val', (v) => `${v.toFixed(2)}`, (v) => expSystem?.updateUniforms({ opacityPeak: v }));
+    bind('exp-op-end', 'exp-op-end-val', (v) => `${v.toFixed(2)}`, (v) => expSystem?.updateUniforms({ opacityEnd: v }));
+
+    const blendSelect = getEl('exp-blend');
+    blendSelect?.addEventListener('change', (e) => expSystem?.updateUniforms({ blending: e.target.value }));
+
+    ['colorStart:exp-col-start', 'colorMid:exp-col-mid', 'colorEnd:exp-col-end'].forEach((pair) => {
+      const [key, id] = pair.split(':');
+      const el = getEl(id);
+      el?.addEventListener('input', (e) => expSystem?.updateUniforms({ [key]: e.target.value }));
+    });
+
+    bind('exp-col-time', 'exp-col-time-val', (v) => `${Math.round(v * 100)}%`, (v) => expSystem?.updateUniforms({ colorMidTime: v }));
+    bind('exp-loop', 'exp-loop-val', (v) => `${v.toFixed(1)}s`, (v) => { if (expSystem) expSystem.config.loopInterval = v; });
+    bind('exp-speed-scale', 'exp-speed-scale-val', (v) => `${v.toFixed(1)}x`, (v) => { if (expSystem) expSystem.config.timeScale = v; });
+
+    // Presets
+    const presetSelect = getEl('exp-preset-select');
+    const customOptsGroup = getEl('exp-custom-opts');
+    const presetNameInput = getEl('exp-preset-name');
+    const saveBtn = getEl('exp-save-btn');
+    const deleteBtn = getEl('exp-delete-btn');
+    const copyJsonBtn = getEl('exp-copy-json-btn');
+    const saveInGameBtn = getEl('exp-save-in-game-btn');
+
+    function refreshPresetDropdown() {
+      if (!customOptsGroup) return;
+      customOptsGroup.replaceChildren();
+      const userPresets = loadUserPresets();
+      const names = Object.keys(userPresets);
+      if (names.length === 0) {
+        const emptyOpt = document.createElement('option');
+        emptyOpt.disabled = true;
+        emptyOpt.textContent = '(No custom presets yet)';
+        customOptsGroup.appendChild(emptyOpt);
+      } else {
+        names.forEach((name) => {
+          const opt = document.createElement('option');
+          opt.value = name;
+          opt.textContent = `💾 ${name}`;
+          customOptsGroup.appendChild(opt);
+        });
+      }
+    }
+
+    function applyConfigToUI(c) {
+      setVal('exp-scale', c.scale ?? 1.0, 'exp-scale-val', (v) => `${(v ?? 1.0).toFixed(2)}x`);
+      setVal('exp-count', c.count, 'exp-count-val', (v) => `${Math.round(v)}`);
+      setVal('exp-life', c.lifespan, 'exp-life-val', (v) => `${v.toFixed(2)}s`);
+      setVal('exp-life-var', c.lifespanVariance, 'exp-life-var-val', (v) => `${Math.round(v * 100)}%`);
+      setVal('exp-speed', c.speed, 'exp-speed-val', (v) => `${Math.round(v)}`);
+      setVal('exp-speed-var', c.speedVariance, 'exp-speed-var-val', (v) => `${Math.round(v * 100)}%`);
+      setVal('exp-drag', c.drag, 'exp-drag-val', (v) => `${v.toFixed(2)}`);
+      setVal('exp-turb', c.turbulence, 'exp-turb-val', (v) => `${v.toFixed(1)}`);
+      setVal('exp-noise', c.noiseFreq, 'exp-noise-val', (v) => `${v.toFixed(1)}`);
+
+      setVal('exp-sz-start', c.sizeStart, 'exp-sz-start-val', (v) => `${v.toFixed(1)}`);
+      setVal('exp-sz-peak', c.sizePeak, 'exp-sz-peak-val', (v) => `${v.toFixed(1)}`);
+      setVal('exp-sz-end', c.sizeEnd, 'exp-sz-end-val', (v) => `${v.toFixed(1)}`);
+      setVal('exp-sz-time', c.sizePeakTime, 'exp-sz-time-val', (v) => `${Math.round(v * 100)}%`);
+
+      setVal('exp-op-start', c.opacityStart, 'exp-op-start-val', (v) => `${v.toFixed(2)}`);
+      setVal('exp-op-peak', c.opacityPeak, 'exp-op-peak-val', (v) => `${v.toFixed(2)}`);
+      setVal('exp-op-end', c.opacityEnd, 'exp-op-end-val', (v) => `${v.toFixed(2)}`);
+
+      if (blendSelect) blendSelect.value = c.blending || 'additive';
+      if (getEl('exp-col-start')) getEl('exp-col-start').value = c.colorStart || '#ffffff';
+      if (getEl('exp-col-mid')) getEl('exp-col-mid').value = c.colorMid || '#ff6600';
+      if (getEl('exp-col-end')) getEl('exp-col-end').value = c.colorEnd || '#2a0e05';
+
+      setVal('exp-col-time', c.colorMidTime, 'exp-col-time-val', (v) => `${Math.round(v * 100)}%`);
+      setVal('exp-loop', c.loopInterval || 1.3, 'exp-loop-val', (v) => `${v.toFixed(1)}s`);
+      setVal('exp-speed-scale', c.timeScale || 1.0, 'exp-speed-scale-val', (v) => `${v.toFixed(1)}x`);
+
+      expSystem.rebuild(c);
+      updateBlastSizeReadout();
+    }
+
+    function selectPreset(key) {
+      const all = getAllPresets();
+      const preset = all[key];
+      if (!preset) return;
+      if (presetSelect) presetSelect.value = key;
+      if (deleteBtn) deleteBtn.disabled = !preset.custom;
+      applyConfigToUI(preset.config);
+      showToast(`Loaded: ${preset.name || key}`);
+    }
+
+    presetSelect?.addEventListener('change', (e) => selectPreset(e.target.value));
+
+    document.querySelectorAll('.exp-quick-btn').forEach((btn) => {
+      btn.addEventListener('click', () => selectPreset(btn.dataset.preset));
+    });
+
+    saveBtn?.addEventListener('click', () => {
+      const name = presetNameInput?.value.trim();
+      if (!name) {
+        showToast('Enter name first');
+        return;
+      }
+      saveUserPreset(name, expSystem.config);
+      refreshPresetDropdown();
+      if (presetSelect) presetSelect.value = name;
+      if (deleteBtn) deleteBtn.disabled = false;
+      if (presetNameInput) presetNameInput.value = '';
+      showToast(`Saved preset "${name}"`);
+    });
+
+    deleteBtn?.addEventListener('click', () => {
+      const key = presetSelect?.value;
+      if (!key) return;
+      deleteUserPreset(key);
+      refreshPresetDropdown();
+      selectPreset('shipkill');
+      showToast(`Deleted preset`);
+    });
+
+    copyJsonBtn?.addEventListener('click', () => {
+      const jsonStr = JSON.stringify(expSystem.config, null, 2);
+      navigator.clipboard?.writeText(jsonStr).then(() => {
+        showToast('JSON copied to clipboard!');
+      }).catch(() => {
+        showToast('Clipboard error');
+      });
+    });
+
+    saveInGameBtn?.addEventListener('click', () => {
+      setActiveExplosionConfig(expSystem.config);
+      showToast('✅ Saved as In-Game Default Explosion!');
+    });
+
+    // Scale ship controls
+    const showScaleCheck = getEl('exp-show-scale-ship');
+    showScaleCheck?.addEventListener('change', (e) => {
+      showScaleShip = e.target.checked;
+      scaleShipGroup.visible = showScaleShip;
+    });
+
+    const scaleModeSelect = getEl('exp-scale-ship-mode');
+    scaleModeSelect?.addEventListener('change', (e) => {
+      scaleShipMode = e.target.value;
+      if (centerScaleShip) centerScaleShip.visible = (scaleShipMode === 'epicenter' || scaleShipMode === 'both');
+      if (besideScaleShip) besideScaleShip.visible = (scaleShipMode === 'beside' || scaleShipMode === 'both');
+    });
+
+    // Playback
+    const playPauseBtn = getEl('exp-play-pause');
+    playPauseBtn?.addEventListener('click', () => {
+      expSystem.playing = !expSystem.playing;
+      playPauseBtn.textContent = expSystem.playing ? '⏸ Pause' : '▶ Play';
+    });
+
+    getEl('exp-trigger')?.addEventListener('click', () => expSystem?.trigger());
+
+    getEl('exp-reset-cam')?.addEventListener('click', () => {
+      camera.position.set(0, 3, 14);
+      controls.target.set(0, 0, 0);
+      controls.update();
+      showToast('Camera Reset');
+    });
+
+    getEl('exp-autoloop')?.addEventListener('change', (e) => {
+      if (expSystem) expSystem.autoLoop = e.target.checked;
+    });
+
+    // Setup initial UI
+    refreshPresetDropdown();
+    applyConfigToUI(initialConfig);
+
+    // Resize handling
+    window.addEventListener('resize', () => {
+      const w = canvas.clientWidth;
+      const h = canvas.clientHeight;
+      renderer.setSize(w, h);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+    });
+
+    // Main render loop
+    let lastTime = performance.now();
+    function animate() {
+      requestAnimationFrame(animate);
+      const now = performance.now();
+      const dt = Math.min((now - lastTime) / 1000, 0.1);
+      lastTime = now;
+
+      controls.update();
+
+      if (centerScaleShip && centerScaleShip.visible) {
+        centerScaleShip.rotation.y += dt * 0.4;
+      }
+      if (besideScaleShip && besideScaleShip.visible) {
+        besideScaleShip.rotation.y += dt * 0.4;
+      }
+
+      expSystem.step(dt);
+      renderer.render(scene, camera);
+    }
+
+    animate();
+  </script>
+</body>
+</html>
+

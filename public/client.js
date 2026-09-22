@@ -4,6 +4,10 @@ import {
   SHOT_FX, createBlast, disposeBlast, disposeFx, updateBlast,
 } from './weapon-fx.js';
 import { initAudio, play as playSound, toggleMute } from './audio.js';
+import {
+  getActiveExplosionConfig,
+  spawnOneShotExplosion,
+} from './particle-explosion.js';
 
 // This client implements the 'mouse' control scheme, the only one the server
 // simulates. The older keyboard schemes ('flight', 'strafe') are archived in
@@ -114,12 +118,15 @@ const TRIGGER_REPEAT_MS = 60;
 const triggersDown = new Set();
 let triggerTimer = null;
 
-const sendFire = () => currentRoom?.send('fire', {
-  // seq lets the server aim with exactly the orientation we predicted;
-  // tick names the world we were looking at, for lag-compensated weapons
-  seq: lookSeq,
-  tick: Math.round(estimatedTick()),
-});
+const sendFire = () => {
+  if (typeof flushLookBatch === 'function') flushLookBatch(performance.now());
+  currentRoom?.send('fire', {
+    // seq lets the server aim with exactly the orientation we predicted;
+    // tick names the world we were looking at, for lag-compensated weapons
+    seq: lookSeq,
+    tick: Math.round(estimatedTick()),
+  });
+};
 
 function pullTrigger(source) {
   if (triggersDown.has(source)) return;
@@ -144,12 +151,14 @@ function releaseTrigger(source) {
 // Losing the pointer (esc, alt-tab, the shop overlay appearing) has to drop
 // the trigger too, or the gun keeps firing at nothing until the next click.
 document.addEventListener('pointerlockchange', () => {
-  if (document.pointerLockElement !== gameCanvas) releaseTrigger();
+  const locked = document.pointerLockElement === gameCanvas;
+  document.body.classList.toggle('pointer-locked', locked);
+  if (!locked) releaseTrigger();
 });
 window.addEventListener('blur', () => { releaseTrigger(); held.clear(); sendInput(); });
 
 window.addEventListener('keydown', (e) => {
-  if (e.target.tagName === 'INPUT') return; // typing in a form, not flying
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return; // typing in a form, not flying
   if (e.key === ' ') {
     e.preventDefault(); // don't scroll the page or "click" a focused button
     if (!e.repeat) pullTrigger('key');
@@ -175,6 +184,26 @@ window.addEventListener('keydown', (e) => {
   if (key === 'm') { toggleMute(); return; }
   if (key === 'g') {
     if (activeGrid) activeGrid.visible = !activeGrid.visible;
+    return;
+  }
+  if (key === 'x') {
+    openExplosionLabTab();
+    return;
+  }
+  if (key === 'o' || key === '`') {
+    openSettingsTab();
+    return;
+  }
+  if (key === 'b') {
+    const current = currentRoom?.state?.botCount ?? 0;
+    const next = current > 0 ? 0 : 4;
+    currentRoom?.send('setBotCount', next);
+    return;
+  }
+  if (key === 't') {
+    const me = currentRoom?.state?.players?.get(currentRoom?.sessionId);
+    const next = !(me?.godMode);
+    currentRoom?.send('setGodMode', next);
     return;
   }
   if (TRACKED.has(key) && !held.has(key)) { held.add(key); sendInput(); }
@@ -239,8 +268,10 @@ const gameCanvas = document.getElementById('game');
 // firing on it would put a shot downrange before they'd even seen the frame.
 gameCanvas.addEventListener('mousedown', (e) => {
   if (e.button !== 0) return;
-  // during the shop the overlay needs real clicks, so there's nothing to grab
-  if (!currentRoom || overlayVisible) return;
+  if (!currentRoom) return;
+  const phase = currentRoom.state?.phase;
+  // During shop or intermission the overlay needs real clicks, so there's nothing to grab
+  if (phase === 'shop' || phase === 'intermission') return;
   if (document.pointerLockElement !== gameCanvas) {
     gameCanvas.requestPointerLock();
     return;
@@ -259,9 +290,13 @@ window.addEventListener('mousemove', (e) => {
 let lastBatchTime = performance.now();
 let rollDir = 0;    // direction of the roll currently ramping (-1, 0, +1)
 let rollScale = 0;  // 0..1 fraction of ROLL_RATE reached so far
-setInterval(() => {
-  const nowMs = performance.now();
-  const dt = (nowMs - lastBatchTime) / 1000;
+
+// Flushes accumulated mouse deltas and roll input into predictedQuat and sends
+// the batch to the server. Runs on every requestAnimationFrame render so mouse
+// look operates at the monitor's native refresh rate (60Hz, 120Hz, 144Hz, 240Hz)
+// with zero timer jitter.
+function flushLookBatch(nowMs) {
+  const dt = Math.min(0.1, (nowMs - lastBatchTime) / 1000);
   lastBatchTime = nowMs;
   if (!currentRoom) { lookDX = 0; lookDY = 0; return; }
 
@@ -284,9 +319,9 @@ setInterval(() => {
   lookDY = 0;
   applyLookBatch(predictedQuat, batch);
   lookHistory.push({ ...batch, q: predictedQuat.clone() });
-  if (lookHistory.length > 128) lookHistory.shift();
+  if (lookHistory.length > 256) lookHistory.shift();
   currentRoom.send('look', batch);
-}, LOOK_INTERVAL);
+}
 
 // Called each frame with our replicated Player state. The server's quat
 // corresponds to lookSeq = p.lookSeq; compare it against what we predicted
@@ -335,6 +370,35 @@ rollRampInput.addEventListener('input', () => {
 });
 // a focused range input swallows w/a/s/d as arrow-key nudges, so hand focus back
 rollRampInput.addEventListener('change', () => rollRampInput.blur());
+
+// --- bot count tuner: server owns the value, we display & send ---
+const botsInput = document.getElementById('bots-input');
+const sendBotCount = () => {
+  const value = parseInt(botsInput.value, 10);
+  if (Number.isFinite(value)) currentRoom?.send('setBotCount', value);
+  botsInput.blur();
+};
+document.getElementById('bots-set')?.addEventListener('click', sendBotCount);
+botsInput?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') sendBotCount();
+});
+
+// --- hull and test mode tuner: set arbitrary hull or toggle infinite hull ---
+const hullInput = document.getElementById('hull-input');
+const godToggle = document.getElementById('god-toggle');
+const sendHull = () => {
+  const value = parseInt(hullInput.value, 10);
+  if (Number.isFinite(value)) currentRoom?.send('setHull', value);
+  hullInput.blur();
+};
+document.getElementById('hull-set')?.addEventListener('click', sendHull);
+hullInput?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') sendHull();
+});
+godToggle?.addEventListener('change', () => {
+  currentRoom?.send('setGodMode', godToggle.checked);
+  godToggle.blur();
+});
 
 // --- juice meter: arc segments in a shallow arc under the reticle, sharing
 // one pool. Rebuilt whenever the player's capacity changes (buying Juice
@@ -529,15 +593,11 @@ const shipTemplatePromise = new GLTFLoader().loadAsync('/models/orion.glb')
       // no backface culling: parts of the hull are modeled single-sided and
       // vanish from some viewing angles with culling on
       o.material.side = THREE.DoubleSide;
-      // Space has no sky bounce, so the ambient term is almost nothing (0.023
-      // — see the lighting block in startGame) and an unlit hull goes to
-      // literal black. A ship silhouetted against empty sky then disappears
-      // entirely. A small cool emissive floor is the cheapest fix that
-      // doesn't touch the key-to-fill ratio the lighting was tuned around:
-      // it lifts the darkest parts off zero and leaves the lit side alone.
+      // Ship hull is lit purely by the scene's three asteroid lights (ambient,
+      // directional sun key, and opposing fill) with no artificial emissive floor.
       if (o.material.emissive) {
-        o.material.emissive = new THREE.Color(0x2a4066);
-        o.material.emissiveIntensity = 1;
+        o.material.emissive = new THREE.Color(0x000000);
+        o.material.emissiveIntensity = 0;
       }
     });
     const box = new THREE.Box3().setFromObject(model);
@@ -960,6 +1020,7 @@ const ui = {
   readyLine: document.getElementById('ready-line'),
   scoreboard: document.getElementById('scoreboard'),
   startBtn: document.getElementById('start-btn'),
+  botSelect: document.getElementById('bot-select'),
   banner: document.getElementById('round-banner'),
   bannerRound: document.querySelector('#round-banner .round'),
   bannerPhase: document.querySelector('#round-banner .phase'),
@@ -984,6 +1045,11 @@ const ui = {
   ramTag: document.getElementById('ram-tag'),
   ramLabel: document.getElementById('ram-label'),
   ramFill: document.getElementById('ram-fill'),
+  fpsTag: document.getElementById('fps-tag'),
+  openSettingsBtn: document.getElementById('open-settings-btn'),
+  openExpLabBtn: document.getElementById('open-exp-lab-btn'),
+  overlaySettingsBtn: document.getElementById('overlay-settings-btn'),
+  overlayLabBtn: document.getElementById('overlay-lab-btn'),
 };
 
 // --- hit confirmation -----------------------------------------------------
@@ -1001,6 +1067,17 @@ function flashHitmarker(killed) {
   el.classList.toggle('kill', !!killed);
   void el.offsetWidth;
   el.classList.add('show');
+}
+
+// Color the red HUD box around a hit ship green for 0.33 seconds
+function flashHitBox(box) {
+  if (!box) return;
+  box.classList.add('hit');
+  if (box._hitTimer) clearTimeout(box._hitTimer);
+  box._hitTimer = setTimeout(() => {
+    box.classList.remove('hit');
+    box._hitTimer = null;
+  }, 330);
 }
 
 // --- killfeed -------------------------------------------------------------
@@ -1047,6 +1124,31 @@ let overlayVisible = true;
 
 ui.startBtn.addEventListener('click', () => currentRoom?.send('startGame'));
 ui.skipBtn.addEventListener('click', () => currentRoom?.send('skip'));
+ui.botSelect?.addEventListener('change', () => {
+  const value = parseInt(ui.botSelect.value, 10);
+  if (Number.isFinite(value)) currentRoom?.send('setBotCount', value);
+  ui.botSelect.blur();
+});
+
+// --- External Tabs (Server Settings & Explosion Lab) ---
+function openSettingsTab() {
+  if (document.pointerLockElement) {
+    document.exitPointerLock?.();
+  }
+  window.open('/settings.html', '_blank');
+}
+
+function openExplosionLabTab() {
+  if (document.pointerLockElement) {
+    document.exitPointerLock?.();
+  }
+  window.open('/explosion-lab.html', '_blank');
+}
+
+ui.openSettingsBtn?.addEventListener('click', openSettingsTab);
+ui.openExpLabBtn?.addEventListener('click', openExplosionLabTab);
+ui.overlaySettingsBtn?.addEventListener('click', openSettingsTab);
+ui.overlayLabBtn?.addEventListener('click', openExplosionLabTab);
 
 const mmss = (seconds) => {
   const s = Math.max(0, Math.ceil(seconds));
@@ -1225,15 +1327,14 @@ function renderHint(me) {
     'click canvas to capture mouse',
     'mouse: yaw/pitch',
     'q/e: roll',
-    'w/s: fwd/back',
+    'wasd: move',
   ];
-  if ((me.tech.get('lateral') ?? 0) > 0) parts.push('a/d: strafe');
   if (me.juiceMax > 0) parts.push('shift: dash');
   parts.push('click/space: fire');
   // only worth showing once there's more than the starting railgun to switch to
   const extraGuns = WEAPON_ORDER.filter((w) => w.id !== 'rail' && (me.tech.get(w.id) ?? 0) > 0);
   if (extraGuns.length) parts.push(`1-${WEAPON_ORDER.length}: weapon`);
-  parts.push('f: fullscreen', 'g: grid', 'm: mute', 'esc: release mouse');
+  parts.push('o: server settings', 'x: explosion lab', 'f: fullscreen', 'g: grid', 'm: mute', 'b: bots', 'esc: release mouse');
   const text = parts.join('   ');
   if (ui.hint.textContent !== text) ui.hint.textContent = text;
 }
@@ -1267,6 +1368,8 @@ function syncUi(room) {
   const remaining = state.phaseEndTick > 0
     ? (state.phaseEndTick - estimatedTick()) * TICK_DT
     : 0;
+
+
 
   if (phase === 'lobby') {
     ui.title.textContent = 'Ready when you are';
@@ -1311,9 +1414,15 @@ function syncUi(room) {
   ui.scrapTag.textContent = `${Math.floor(me.scrap)} scrap`;
 
   const hullFrac = me.maxHull > 0 ? me.hull / me.maxHull : 0;
-  ui.hullLabel.textContent = `hull ${Math.ceil(me.hull)}/${me.maxHull}`;
+  ui.hullLabel.textContent = me.godMode
+    ? `hull ${Math.ceil(me.hull)}/${me.maxHull} [TEST MODE]`
+    : `hull ${Math.ceil(me.hull)}/${me.maxHull}`;
   ui.hullFill.style.width = `${(hullFrac * 100).toFixed(1)}%`;
   ui.hullFill.className = hullFrac > 0.5 ? '' : (hullFrac > 0.25 ? 'hurt' : 'critical');
+
+  const hullCurrent = document.getElementById('hull-current');
+  if (hullCurrent) hullCurrent.textContent = String(Math.ceil(me.hull));
+  if (godToggle && godToggle !== document.activeElement) godToggle.checked = Boolean(me.godMode);
 
   renderWeapons(me);
   renderHint(me);
@@ -1368,12 +1477,10 @@ function renderRoster(players, myId, listItems) {
 // degrades into a findable marker when far.
 
 // Must track SHIP_RADIUS in src/game/tuning.ts and SHIP_LENGTH above: the
-// box frames what you actually have to hit, and a box drawn to the old
-// 1.2-unit hull around a 2.2-unit hitbox teaches the wrong aim.
+// circle outlines what you actually have to hit.
 const SHIP_BOUND_RADIUS = 2.2;
-const TARGET_BOX_MIN_HALF = 7;   // px — floor, so a distant ship stays findable
-const TARGET_BOX_PAD = 1.35;     // grow past the hull so the box frames it
-const NAMETAG_GAP = 4;           // px between the top of the box and the name
+const WIDE_BORE_RADIUS_PER_TIER = 0.5;
+const NAMETAG_GAP = 4;           // px between the top of the circle and the name
 // How near an opponent has to be before an off-screen arrow appears for them.
 // Not "every enemy, always": in a full room that's a permanent ring of
 // arrows, which is the same as no arrows. This is roughly the range at which
@@ -1404,7 +1511,7 @@ const _placed = { dist: 0, onScreen: false, x: 0, y: 0, half: 0, sx: 0, sy: 0 };
  * behind — turn that way and you'll find it — which is exactly the question
  * an edge arrow answers.
  */
-function projectTarget(worldPos, camera, w, h) {
+function projectTarget(worldPos, camera, w, h, hitRadius = SHIP_BOUND_RADIUS) {
   _toShip.copy(worldPos).sub(camera.position);
   _camFwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
   _camRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
@@ -1422,13 +1529,13 @@ function projectTarget(worldPos, camera, w, h) {
 
   _ndc.copy(worldPos).project(camera);
   _placed.onScreen = Math.abs(_ndc.x) <= 1 && Math.abs(_ndc.y) <= 1;
-  // Half-height in pixels of a sphere of SHIP_BOUND_RADIUS at this depth.
+  // Radius in pixels of a sphere of hitRadius at this depth.
   // Uses `depth` (the along-view distance), not the straight-line distance —
   // perspective divides by the view-space z, so using the hypotenuse would
-  // undersize boxes toward the edges of the frame.
+  // undersize circles toward the edges of the frame.
   const halfFov = (camera.fov * Math.PI) / 360; // fov is vertical, in degrees
-  const projected = (SHIP_BOUND_RADIUS / depth / Math.tan(halfFov)) * (h / 2);
-  _placed.half = Math.max(TARGET_BOX_MIN_HALF, projected * TARGET_BOX_PAD);
+  const projected = (hitRadius / depth / Math.tan(halfFov)) * (h / 2);
+  _placed.half = Math.max(1, projected);
   _placed.x = (_ndc.x * 0.5 + 0.5) * w;
   _placed.y = (-_ndc.y * 0.5 + 0.5) * h;
   return _placed;
@@ -1593,6 +1700,8 @@ async function startGame(room) {
   document.addEventListener('fullscreenchange', handleResize);
   handleResize();
 
+
+
   // --- one ship + one list entry per player ---
   const meshes = new Map(); // sessionId -> Object3D (ship clone or fallback cube)
   window.__game = { scene, meshes, room }; // debug hook for headless inspection
@@ -1653,7 +1762,12 @@ async function startGame(room) {
     if (mesh) { scene.remove(mesh); mesh.geometry?.dispose(); }
     meshes.delete(sessionId);
     const overlay = overlays.get(sessionId);
-    if (overlay) { overlay.box.remove(); overlay.tag.remove(); overlay.el.remove(); }
+    if (overlay) {
+      if (overlay.box._hitTimer) clearTimeout(overlay.box._hitTimer);
+      overlay.box.remove();
+      overlay.tag.remove();
+      overlay.el.remove();
+    }
     overlays.delete(sessionId);
     listItems.get(sessionId)?.remove();
     listItems.delete(sessionId);
@@ -1701,18 +1815,28 @@ async function startGame(room) {
   // this spawned; the shell is drawn at the true radius so players can learn
   // to judge the area.
   const blasts = new Map(); // id -> { mesh, radius, spawnTick }
+  const activeOneShots = new Set();
 
   $(room.state).blasts.onAdd((blast, id) => {
+    const blastPos = new THREE.Vector3(blast.x, blast.y, blast.z);
+    playSound(
+      blast.kind === 'death' ? 'death' : 'blast',
+      camera.position.distanceTo(blastPos)
+    );
+
+    if (blast.kind === 'death') {
+      const config = getActiveExplosionConfig();
+      const oneShot = spawnOneShotExplosion(scene, blastPos, config);
+      activeOneShots.add(oneShot);
+      return;
+    }
+
     const mesh = createBlast(blast.radius, blast.kind);
-    mesh.position.set(blast.x, blast.y, blast.z);
+    mesh.position.copy(blastPos);
     scene.add(mesh);
     blasts.set(id, {
       mesh, radius: blast.radius, kind: blast.kind, spawnTick: blast.spawnTick,
     });
-    playSound(
-      blast.kind === 'death' ? 'death' : 'blast',
-      camera.position.distanceTo(mesh.position)
-    );
   });
 
   $(room.state).blasts.onRemove((_blast, id) => {
@@ -1729,6 +1853,16 @@ async function startGame(room) {
   const dragCurrent = document.getElementById('drag-current');
   $(room.state).listen('drag', (value) => { dragCurrent.textContent = value.toFixed(2); });
 
+  // --- bot count tuner display: server owns the value ---
+  const botsCurrent = document.getElementById('bots-current');
+  const updateBotUi = (val) => {
+    if (botsCurrent) botsCurrent.textContent = String(val);
+    if (ui.botSelect && ui.botSelect.value !== String(val)) ui.botSelect.value = String(val);
+    if (botsInput && document.activeElement !== botsInput) botsInput.value = String(val);
+  };
+  if (room.state.botCount !== undefined) updateBotUi(room.state.botCount);
+  $(room.state).listen('botCount', (value) => { updateBotUi(value); });
+
   // a rejected purchase (raced someone to the last of your scrap, say) comes
   // back as a message rather than silently doing nothing
   room.onMessage('shopError', (reason) => { status.textContent = `can't buy that: ${reason}`; });
@@ -1739,6 +1873,19 @@ async function startGame(room) {
   room.onMessage('hit', (msg) => {
     flashHitmarker(msg.killed);
     playSound(msg.killed ? 'killmark' : 'hitmark');
+
+    // Temporarily color the red HUD box around the hit ship green for 0.33s
+    let target = msg?.victimId ? overlays.get(msg.victimId) : null;
+    if (!target && msg?.victim) {
+      for (const [id, ov] of overlays) {
+        const p = room.state.players?.get(id);
+        if (p?.name === msg.victim) {
+          target = ov;
+          break;
+        }
+      }
+    }
+    if (target?.box) flashHitBox(target.box);
   });
 
   room.onMessage('kill', (msg) => pushKillfeed(msg, room.sessionId));
@@ -1763,6 +1910,8 @@ async function startGame(room) {
     blasts.forEach(({ mesh }) => { scene.remove(mesh); disposeBlast(mesh); });
     blasts.clear();
     disposeFx();
+    activeOneShots.forEach((oneShot) => oneShot.dispose());
+    activeOneShots.clear();
     overlays.clear();
     ui.targetBoxes.replaceChildren();
     ui.nametags.replaceChildren();
@@ -1785,13 +1934,41 @@ async function startGame(room) {
 
   // --- render loop: copy server state onto meshes, first-person camera ---
   let lastFrame = performance.now();
+  let fpsFrames = 0;
+  let lastFpsTime = performance.now();
+  let currentFps = 60;
+
   function render() {
     if (!running) return;
-    // state arrives shortly *after* joinOrCreate resolves — skip until synced
+    const frameNow = performance.now();
+    const frameDt = Math.min(0.1, (frameNow - lastFrame) / 1000); // clamped: tab-out
+    lastFrame = frameNow;
+
+    // Track FPS over a rolling 250ms window so readout is steady and readable
+    fpsFrames++;
+    if (frameNow - lastFpsTime >= 250) {
+      currentFps = Math.round((fpsFrames * 1000) / (frameNow - lastFpsTime));
+      fpsFrames = 0;
+      lastFpsTime = frameNow;
+      if (ui.fpsTag) ui.fpsTag.textContent = `${currentFps} FPS`;
+    }
+
+    // Flush mouse look and roll directly on this frame so camera rotation runs
+    // at the display's native refresh rate (60Hz, 120Hz, 144Hz, 240Hz) with zero timer jitter.
+    flushLookBatch(frameNow);
+
+    // Extrapolate positions since the latest server patch so ships and camera
+    // glide smoothly at the display's native refresh rate instead of teleporting
+    // at the network tick rate.
+    const patchAge = Math.max(0, Math.min(0.1, (frameNow - tickBase.at) / 1000));
     room.state.players?.forEach((p, sessionId) => {
       const mesh = meshes.get(sessionId);
       if (!mesh) return;
-      mesh.position.set(p.x, p.y, p.z);
+      mesh.position.set(
+        p.x + p.vx * patchAge,
+        p.y + p.vy * patchAge,
+        p.z + p.vz * patchAge
+      );
       mesh.quaternion.set(p.qx, p.qy, p.qz, p.qw);
       // a destroyed ship stops being drawn even though it keeps drifting as a
       // wreck server-side — otherwise you'd keep shooting at a corpse
@@ -1805,6 +1982,13 @@ async function startGame(room) {
         entry.mesh, entry.radius,
         Math.max(0, (nowTick - entry.spawnTick) * TICK_DT), entry.kind
       );
+    });
+
+    // Active one-shot explosions (e.g. ship deaths)
+    activeOneShots.forEach((oneShot) => {
+      if (!oneShot.step(frameDt)) {
+        activeOneShots.delete(oneShot);
+      }
     });
 
     // Asteroids drift and tumble as pure functions of the shared tick, so
@@ -1828,10 +2012,6 @@ async function startGame(room) {
       );
     });
 
-    const frameNow = performance.now();
-    const frameDt = Math.min(0.1, (frameNow - lastFrame) / 1000); // clamped: tab-out
-    lastFrame = frameNow;
-
     const myState = room.state.players?.get(room.sessionId);
     let speed = 0;
     if (myState) {
@@ -1839,15 +2019,17 @@ async function startGame(room) {
       renderJuice(myState.juice);
       noteJuice(myState.juice);
       speed = Math.hypot(myState.vx, myState.vy, myState.vz);
-      ui.hud.textContent = `speed ${speed.toFixed(1)}`;
+      ui.hud.textContent = `speed ${speed.toFixed(1)} · ${currentFps} FPS`;
       renderRoster(room.state.players, room.sessionId, listItems);
+    } else {
+      ui.hud.textContent = `speed 0.0 · ${currentFps} FPS`;
     }
     renderSpeedFx(camera, canvas, speed, frameDt);
 
     const me = meshes.get(room.sessionId);
     if (me) {
       // first-person: camera sits AT the ship, wearing the PREDICTED
-      // orientation (position stays server-authoritative) so looking around
+      // orientation (position smoothly extrapolated from velocity) so looking around
       // has zero latency; everyone else's mesh keeps the replicated quat
       me.quaternion.copy(predictedQuat);
       camera.position.copy(me.position);
@@ -1885,6 +2067,10 @@ async function startGame(room) {
       // that placing them here is meant to avoid.
       camera.updateMatrixWorld();
       const { w, h } = viewport;
+      const myState = room.state.players?.get(room.sessionId);
+      const boreTier = myState?.tech?.get ? (myState.tech.get('railBore') ?? 0) : 0;
+      const hitRadius = SHIP_BOUND_RADIUS + WIDE_BORE_RADIUS_PER_TIER * boreTier;
+
       overlays.forEach((overlay, sessionId) => {
         const mesh = meshes.get(sessionId);
         // mesh.visible already encodes "alive" for opponents, so a wreck
@@ -1896,7 +2082,7 @@ async function startGame(room) {
           return;
         }
 
-        const placed = projectTarget(mesh.position, camera, w, h);
+        const placed = projectTarget(mesh.position, camera, w, h, hitRadius);
         // Exactly one of the two treatments, never both: a box and an arrow
         // for the same ship at the same time is two answers to one question.
         const boxed = placed.onScreen;

@@ -168,13 +168,17 @@ export const ROUND_STIPEND_PER_ROUND = 10;
 // Both zero = no bots at all. sync() removes any already in the field, so
 // this switches them off live rather than only for new rooms. Put these back
 // to 4 / 5 to bring them back.
-export const BOT_TARGET_COMBATANTS = 0; // bots top the field up to this many ships
-export const BOT_MAX = 0;
+export const BOT_TARGET_COMBATANTS = 4; // bots top the field up to this many ships
+export const BOT_MAX = 5;
 // Bots fire on the same weapon cooldowns players do, multiplied by this.
 // Above 1 = slower. A solo player faces three of them at once, so matching a
 // player's cadence three times over isn't "hard", it's a wall of bolts with
 // no gap to push into. The gap is what makes a fight readable.
 export const BOT_FIRE_COOLDOWN_MULT = 1.7;
+// Aim error: spread around target. BASE is point-blank floor, PER_UNIT grows with range.
+// 4.5 gives realistic dispersion against SHIP_RADIUS=2.2 instead of sniper precision.
+export const BOT_AIM_JITTER_BASE = 4.5;
+export const BOT_AIM_JITTER_PER_UNIT = 0.05;
 
 // --- shared vectors / constants ---
 export const IDENTITY = new Quaternion();
