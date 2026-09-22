@@ -19,11 +19,12 @@
     body { font-family: monospace; background: var(--bg); color: var(--ink); display: flex; justify-content: center; padding-top: 4vh; }
     main { width: 720px; }
     h1 { font-size: 1.2rem; }
-    input, button { font-family: inherit; font-size: 1rem; padding: 0.4rem; }
+    input, button, select { font-family: inherit; font-size: 1rem; padding: 0.4rem; }
     input { width: 200px; }
-    button { background: var(--panel); color: var(--ink); border: 1px solid var(--line); cursor: pointer; }
-    button:hover:not(:disabled) { border-color: var(--go); color: var(--go); }
-    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    button, select { background: var(--panel); color: var(--ink); border: 1px solid var(--line); cursor: pointer; }
+    button:hover:not(:disabled), select:hover:not(:disabled) { border-color: var(--go); color: var(--go); }
+    button:disabled, select:disabled { opacity: 0.4; cursor: not-allowed; }
+    select:focus { outline: none; border-color: var(--go); }
     .hidden { display: none !important; }
     #status, #controls-hint { color: var(--dim); font-size: 0.85rem; }
 
@@ -62,20 +63,29 @@
       -webkit-mask: linear-gradient(#000 35%, transparent 35% 65%, #000 65%);
       mask: linear-gradient(#000 35%, transparent 35% 65%, #000 65%); }
 
-    /* Target boxes: one screen-space rectangle per opponent, positioned per
-       frame from client.js. Deliberately NOT drawn in the scene — as DOM over
-       the canvas they can't be depth-tested against it, so the box stays
-       visible when the ship behind a rock isn't. overflow:hidden clips boxes
-       whose target has swung off the side of the frame. */
-    #target-boxes { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+    /* Target outlines: screen-space projections of the true hit radius circle
+       per opponent, positioned per frame from client.js.
+       Additive blending ensures the circle brightens rather than occludes the
+       ship or starfield beneath it. */
+    #target-boxes {
+      position: absolute; inset: 0; pointer-events: none; overflow: hidden;
+      mix-blend-mode: screen;
+      mix-blend-mode: plus-lighter;
+    }
     .target-box {
       position: absolute; top: 0; left: 0; /* moved with transform, not offsets */
       box-sizing: border-box;
-      border: 1px solid var(--bad);
-      /* a faint outer ring so the box reads against bright scenery (the sun,
-         the lit limb of the moon) as well as against black */
-      box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55), 0 0 6px rgba(255, 85, 102, 0.5);
+      border-radius: 50%;
+      border: 1.5px solid var(--bad);
+      box-shadow: 0 0 6px rgba(255, 85, 102, 0.7);
+      mix-blend-mode: screen;
+      mix-blend-mode: plus-lighter;
       will-change: transform, width, height;
+      transition: border-color 0.05s ease, box-shadow 0.05s ease;
+    }
+    .target-box.hit {
+      border-color: var(--go) !important;
+      box-shadow: 0 0 10px var(--go) !important;
     }
 
     /* Nametags: who each box belongs to, in screen space over the canvas for
@@ -197,6 +207,11 @@
     #round-banner .phase { color: var(--dim); text-transform: uppercase; letter-spacing: 0.1em; }
     #round-banner .clock { color: var(--warn); }
     #scrap-tag { top: 8px; right: 8px; color: var(--scrap); }
+    #fps-tag {
+      position: absolute; top: 8px; right: 85px; font-size: 0.8rem; color: var(--go);
+      background: rgba(11, 14, 26, 0.7); padding: 0.2rem 0.6rem; border: 1px solid var(--line);
+      pointer-events: none; z-index: 10;
+    }
 
     #hull-wrap { bottom: 8px; left: 8px; width: 180px; }
     #hull-bar { height: 8px; border: 1px solid var(--line); background: rgba(0,0,0,0.5); }
@@ -236,6 +251,9 @@
     #overlay h2 { margin: 0; font-size: 1.1rem; letter-spacing: 0.1em; text-transform: uppercase; }
     #overlay .sub { color: var(--dim); font-size: 0.8rem; margin: 0; }
     #overlay-clock { color: var(--warn); font-size: 0.8rem; }
+    .lobby-actions { display: flex; gap: 1rem; align-items: center; justify-content: center; }
+    #bot-picker { display: flex; gap: 0.5rem; align-items: center; font-size: 0.9rem; color: var(--dim); }
+    #bot-picker select { padding: 0.35rem 0.5rem; font-size: 0.9rem; }
 
     #cards { display: flex; gap: 0.8rem; align-items: stretch; justify-content: center; }
     .card {
@@ -288,16 +306,43 @@
     table#scoreboard tr.me td { color: var(--go); }
     table#scoreboard tr.bot td { color: var(--dim); }
 
+    .top-actions {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+    }
+    .top-btn {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      color: var(--ink);
+      font-size: 0.8rem;
+      padding: 0.3rem 0.65rem;
+      cursor: pointer;
+      border-radius: 3px;
+      transition: all 0.15s ease;
+    }
+    .top-btn:hover {
+      border-color: var(--go);
+      color: var(--go);
+    }
+
     /* --- dev tuners --- */
     #tuners { margin-top: 0.5rem; font-size: 0.85rem; color: var(--dim); display: flex; gap: 1.5rem; align-items: center; flex-wrap: wrap; }
     #tuners input[type=number] { width: 90px; font-size: 0.85rem; }
     #tuners input[type=range] { width: 140px; vertical-align: middle; }
+    #tuners input[type=checkbox] { width: auto; vertical-align: middle; cursor: pointer; }
     #tuners button { font-size: 0.85rem; }
   </style>
 </head>
 <body>
   <main>
-    <h1>3dSpaceship</h1>
+    <header style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+      <h1 style="margin: 0;">3dSpaceship</h1>
+      <div class="top-actions">
+        <button id="open-settings-btn" type="button" class="top-btn" title="Open Server Settings in a new tab (or press O)">⚙️ Server Settings</button>
+        <button id="open-exp-lab-btn" type="button" class="top-btn" title="Open Explosion Lab in a new tab (or press X)">💥 Explosion Lab</button>
+      </div>
+    </header>
 
     <form id="join-form">
       <input id="name-input" placeholder="your name" maxlength="24" autocomplete="off" required />
@@ -317,6 +362,7 @@
         <div id="nametags" aria-hidden="true"></div>
         <div id="edge-arrows" aria-hidden="true"></div>
         <svg id="juice" viewBox="0 0 132 132" aria-hidden="true"></svg>
+        <div id="fps-tag">-- FPS</div>
 
         <div id="round-banner" class="hud-layer hidden">
           <span class="round">Round 1</span>
@@ -352,7 +398,24 @@
 
           <!-- lobby -->
           <div id="overlay-lobby">
-            <button id="start-btn">Start Game</button>
+            <div class="lobby-actions">
+              <button id="start-btn">Start Game</button>
+              <div id="bot-picker">
+                <label for="bot-select">AI Bots:</label>
+                <select id="bot-select">
+                  <option value="0">0 (Off)</option>
+                  <option value="1">1 Bot</option>
+                  <option value="2">2 Bots</option>
+                  <option value="3">3 Bots</option>
+                  <option value="4" selected>4 Bots</option>
+                  <option value="5">5 Bots</option>
+                  <option value="6">6 Bots</option>
+                  <option value="8">8 Bots</option>
+                </select>
+              </div>
+              <button id="overlay-settings-btn" type="button" title="Open Server Settings in a new tab (O)">⚙️ Settings</button>
+              <button id="overlay-lab-btn" type="button" title="Open Explosion Lab in a new tab (X)">💥 Lab</button>
+            </div>
           </div>
 
           <!-- shop -->
@@ -391,6 +454,19 @@
         <span>
           <label for="roll-ramp-input">roll ramp-up: <span id="roll-ramp-current">0.60s</span></label>
           <input id="roll-ramp-input" type="range" min="0" max="2" step="0.05" value="0.6" />
+        </span>
+        <span>
+          bots: <span id="bots-current">4</span>
+          <input id="bots-input" type="number" step="1" min="0" max="8" value="4" />
+          <button id="bots-set" type="button">set</button>
+        </span>
+        <span>
+          hull: <span id="hull-current">100</span>
+          <input id="hull-input" type="number" step="1000" min="1" max="999999" placeholder="99999" />
+          <button id="hull-set" type="button">set</button>
+          <label style="margin-left: 0.5rem; cursor: pointer; color: var(--go);">
+            <input id="god-toggle" type="checkbox" /> infinite hull (test mode)
+          </label>
         </span>
       </div>
     </div>

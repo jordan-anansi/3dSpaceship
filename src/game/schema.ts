@@ -1,5 +1,5 @@
 import { Schema, MapSchema, ArraySchema, type } from '@colyseus/schema';
-import { BASE_HULL, STARTING_SCRAP } from './tuning';
+import { BASE_HULL, BOT_TARGET_COMBATANTS, DASH_IMPULSE, MAX_WISH, STARTING_SCRAP, THRUST_ACCEL } from './tuning';
 
 // One offered upgrade card. Name and blurb are replicated rather than looked
 // up client-side: the catalog lives in upgrades.ts (server TS), and shipping
@@ -54,6 +54,8 @@ export class Player extends Schema {
   @type('boolean') alive: boolean = true;
   @type('number') hull: number = BASE_HULL;
   @type('number') maxHull: number = BASE_HULL;
+  // Testing mode: near-infinite hull, immune to destruction
+  @type('boolean') godMode: boolean = false;
   // tick this player respawns on (0 = not waiting)
   @type('number') respawnTick: number = 0;
   // dash charges remaining, fractional so the HUD can draw the one that's
@@ -161,6 +163,12 @@ export class LobbyState extends Schema {
   // the world they were actually looking at.
   @type('number') tick: number = 0;
 
+  // --- fundamental live server & world settings ---
+  @type('number') maxSpeed: number = MAX_WISH;
+  @type('number') thrustAccel: number = THRUST_ACCEL;
+  @type('number') dashImpulse: number = DASH_IMPULSE;
+  @type('number') baseHull: number = BASE_HULL;
+
   // --- round structure ---
   // 'lobby'        — free flight, waiting for someone to press Start
   // 'shop'         — everyone picks one of two cards
@@ -170,4 +178,6 @@ export class LobbyState extends Schema {
   @type('number') round: number = 0;
   // tick the current phase ends on (0 = phase has no timer, i.e. lobby)
   @type('number') phaseEndTick: number = 0;
+  // target number of combatants topped up by bots (replicated so clients stay in sync)
+  @type('number') botCount: number = BOT_TARGET_COMBATANTS;
 }

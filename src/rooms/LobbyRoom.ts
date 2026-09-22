@@ -77,10 +77,14 @@ function accelerate(p: Player, wishDir: Vector3, wishSpeed: number, maxWish: num
 // the nose AND shrink the total deflection, rather than just capping sideways
 // speed after the fact. Same trick Source uses for differing forward/side
 // move speeds.
-function wishFromInput(moveZ: number, moveX: number, strafeScale: number, orientation: Quaternion) {
+// Symmetrical thrust on W/S/A/D:
+// W (moveZ=1) = local forward, S (moveZ=-1) = local back
+// A (moveX=-1) = local left, D (moveX=1) = local right
+// Diagonals combine into normalized 45° unit vectors at identical full power.
+function wishFromInput(moveZ: number, moveX: number, orientation: Quaternion) {
   const wishVel = new Vector3()
     .addScaledVector(LOCAL_FORWARD, moveZ)
-    .addScaledVector(LOCAL_RIGHT, moveX * strafeScale);
+    .addScaledVector(LOCAL_RIGHT, moveX);
   const mag = Math.min(1, wishVel.length());
   if (mag < 1e-6) return { dir: wishVel, mag: 0 };
   return { dir: wishVel.normalize().applyQuaternion(orientation), mag };
@@ -126,12 +130,109 @@ export class LobbyRoom extends Room<LobbyState> {
 
   onCreate() {
     this.setState(new LobbyState());
+    // 60 Hz state replication (Colyseus default is 50ms / 20 Hz).
+    // Matches server simulation rate and eliminates coarse 50ms network jumps.
+    this.setPatchRate(1000 / 60);
+
+    this.onMessage('setServerSettings', (_client, settings: Partial<{
+      maxSpeed: number;
+      thrustAccel: number;
+      drag: number;
+      dashImpulse: number;
+      baseHull: number;
+      botCount: number;
+    }>) => {
+      if (!settings || typeof settings !== 'object') return;
+      if (typeof settings.maxSpeed === 'number' && Number.isFinite(settings.maxSpeed)) {
+        this.state.maxSpeed = Math.max(10, Math.min(500, settings.maxSpeed));
+      }
+      if (typeof settings.thrustAccel === 'number' && Number.isFinite(settings.thrustAccel)) {
+        this.state.thrustAccel = Math.max(0.01, Math.min(5.0, settings.thrustAccel));
+      }
+      if (typeof settings.drag === 'number' && Number.isFinite(settings.drag)) {
+        this.state.drag = Math.max(0, Math.min(5, settings.drag));
+      }
+      if (typeof settings.dashImpulse === 'number' && Number.isFinite(settings.dashImpulse)) {
+        this.state.dashImpulse = Math.max(5, Math.min(300, settings.dashImpulse));
+      }
+      if (typeof settings.baseHull === 'number' && Number.isFinite(settings.baseHull)) {
+        const newHull = Math.max(10, Math.min(1000, Math.round(settings.baseHull)));
+        const oldHull = this.state.baseHull;
+        this.state.baseHull = newHull;
+        if (newHull !== oldHull) {
+          this.state.players.forEach((p) => {
+            if (!p.godMode) {
+              const prevMax = p.maxHull;
+              const ratio = p.hull / (prevMax || 1);
+              applyStats(p, this.state);
+              p.hull = Math.max(1, Math.round(p.maxHull * ratio));
+            }
+          });
+        }
+      }
+      if (typeof settings.botCount === 'number' && Number.isFinite(settings.botCount)) {
+        this.state.botCount = Math.max(0, Math.min(8, Math.round(settings.botCount)));
+        if (this.state.phase === 'combat') {
+          this.bots.sync(
+            this.state.players,
+            this.state.botCount,
+            Math.max(BOT_MAX, this.state.botCount),
+            this.state.round
+          );
+        }
+      }
+      console.log(`[lobby] updated serverSettings: maxSpeed=${this.state.maxSpeed}, thrustAccel=${this.state.thrustAccel}, drag=${this.state.drag}, dashImpulse=${this.state.dashImpulse}, baseHull=${this.state.baseHull}, botCount=${this.state.botCount}`);
+    });
 
     this.onMessage('setDrag', (_client, value: unknown) => {
       const drag = Number(value);
       if (Number.isFinite(drag)) {
         this.state.drag = Math.max(0, Math.min(5, drag));
         console.log(`[lobby] drag set to ${this.state.drag}`);
+      }
+    });
+
+    this.onMessage('setBotCount', (_client, value: unknown) => {
+      const count = Number(value);
+      if (Number.isFinite(count)) {
+        this.state.botCount = Math.max(0, Math.min(8, Math.round(count)));
+        console.log(`[lobby] botCount set to ${this.state.botCount}`);
+        if (this.state.phase === 'combat') {
+          this.bots.sync(
+            this.state.players,
+            this.state.botCount,
+            Math.max(BOT_MAX, this.state.botCount),
+            this.state.round
+          );
+        }
+      }
+    });
+
+    this.onMessage('setGodMode', (client, value: unknown) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player) return;
+      player.godMode = Boolean(value);
+      if (player.godMode) {
+        player.maxHull = 99999;
+        player.hull = 99999;
+      } else {
+        const stats = applyStats(player, this.state);
+        player.maxHull = stats.maxHull;
+        player.hull = stats.maxHull;
+      }
+      console.log(`[lobby] ${player.name} godMode=${player.godMode} (hull=${player.hull})`);
+    });
+
+    this.onMessage('setHull', (client, value: unknown) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player) return;
+      const h = Number(value);
+      if (Number.isFinite(h) && h > 0) {
+        const hullVal = Math.round(h);
+        player.maxHull = Math.max(player.maxHull, hullVal);
+        player.hull = hullVal;
+        if (hullVal >= 99999) player.godMode = true;
+        console.log(`[lobby] ${player.name} hull set to ${player.hull}`);
       }
     });
 
@@ -238,7 +339,7 @@ export class LobbyRoom extends Room<LobbyState> {
     // Bots are synced at the START of combat so their loadout matches the
     // round being fought, and so a player who joined during the shop is
     // already counted when we decide how many to field.
-    this.bots.sync(this.state.players, BOT_TARGET_COMBATANTS, BOT_MAX, this.state.round);
+    this.bots.sync(this.state.players, this.state.botCount, Math.max(BOT_MAX, this.state.botCount), this.state.round);
     this.state.players.forEach((p, id) => {
       p.ready = false;
       p.offer.clear();
@@ -310,7 +411,7 @@ export class LobbyRoom extends Room<LobbyState> {
       // and a small object; the alternative is an invalidation rule that has
       // to fire on purchases, bot re-equips and joins, and silently
       // desyncs the simulation from the player's loadout when it doesn't.
-      const stats = statsFor(p);
+      const stats = statsFor(p, this.state);
       const input = this.stepIntent(p, sessionId, dt);
 
       // Friction first, then accelerate — Source's order. Doing it this way
@@ -328,7 +429,7 @@ export class LobbyRoom extends Room<LobbyState> {
       // but takes no input — it's out until respawn.
       if (p.alive && (input.moveZ || input.moveX)) {
         const orientation = new Quaternion(p.qx, p.qy, p.qz, p.qw);
-        const { dir, mag } = wishFromInput(input.moveZ, input.moveX, stats.strafeScale, orientation);
+        const { dir, mag } = wishFromInput(input.moveZ, input.moveX, orientation);
         if (mag > 0) {
           accelerate(p, dir, stats.wishSpeed * mag, stats.maxWish * mag, stats.thrustAccel, dt);
         }
@@ -454,8 +555,15 @@ export class LobbyRoom extends Room<LobbyState> {
     if (victimId === byId) return;
 
     const dealt = Math.min(amount, victim.hull);
-    victim.hull -= dealt;
-    const killed = victim.hull <= 0;
+    if (victim.godMode) {
+      // Testing mode: register hit events and damage credit for the shooter,
+      // but keep testing player's hull topped up so they do not die.
+      victim.hull = 99999;
+      victim.maxHull = 99999;
+    } else {
+      victim.hull -= dealt;
+    }
+    const killed = !victim.godMode && victim.hull <= 0;
 
     const shooter = this.state.players.get(byId);
     if (shooter) {
@@ -483,6 +591,7 @@ export class LobbyRoom extends Room<LobbyState> {
       amount: Math.round(dealt),
       killed,
       victim: victim.name,
+      victimId,
     });
 
     if (!killed) return;
@@ -527,8 +636,9 @@ export class LobbyRoom extends Room<LobbyState> {
     // face the middle of the field so you spawn looking at something
     const q = new Quaternion().setFromUnitVectors(LOCAL_FORWARD, at.clone().negate().normalize());
     p.qx = q.x; p.qy = q.y; p.qz = q.z; p.qw = q.w;
-    const stats = applyStats(p);
-    p.hull = stats.maxHull;
+    const stats = applyStats(p, this.state);
+    p.hull = p.godMode ? 99999 : stats.maxHull;
+    p.maxHull = p.godMode ? 99999 : stats.maxHull;
     p.juice = stats.juiceMax;
     p.alive = true;
     p.respawnTick = 0;
@@ -798,7 +908,7 @@ export class LobbyRoom extends Room<LobbyState> {
   private dash(sessionId: string, seq: number) {
     const p = this.state.players.get(sessionId);
     if (!p || !p.alive || p.juice < 1) return;
-    const stats = statsFor(p);
+    const stats = statsFor(p, this.state);
     if (stats.juiceMax <= 0) return; // no Juice Capacitor, no dash
     p.juice -= 1;
 
@@ -821,7 +931,8 @@ export class LobbyRoom extends Room<LobbyState> {
     // willing to leave you on this axis; the impulse limits how far it may
     // move you to get there. Whichever binds first wins.
     const currentSpeed = p.vx * dir.x + p.vy * dir.y + p.vz * dir.z;
-    const delta = Math.min(DASH_IMPULSE, DASH_CEIL_MULT * stats.maxWish - currentSpeed);
+    const impulse = this.state.dashImpulse ?? DASH_IMPULSE;
+    const delta = Math.min(impulse, DASH_CEIL_MULT * stats.maxWish - currentSpeed);
     if (delta > 0) {
       p.vx += dir.x * delta;
       p.vy += dir.y * delta;
@@ -834,14 +945,20 @@ export class LobbyRoom extends Room<LobbyState> {
 
   // ------------------------------------------------------------ membership
 
-  onJoin(client: Client, options: { name?: string }) {
+  onJoin(client: Client, options: { name?: string; isSettings?: boolean }) {
+    if (options?.isSettings) {
+      this.clientsById.set(client.sessionId, client);
+      console.log(`[lobby] settings observer joined (${client.sessionId})`);
+      return;
+    }
+
     const player = new Player();
     player.name = (options.name || 'anonymous').slice(0, 24);
     // No tech entry for the starting gun. Ownership of `defaultWeapon` is a
     // special case everywhere it's checked (setWeapon, fire, the HUD strip),
     // so granting it a tier would be a second source of truth — and there is
     // no catalog card that could ever legitimately set one.
-    applyStats(player);
+    applyStats(player, this.state);
     const at = randomSpawn();
     player.x = at.x; player.y = at.y; player.z = at.z;
     const q = new Quaternion().setFromUnitVectors(LOCAL_FORWARD, at.clone().negate().normalize());
@@ -856,6 +973,12 @@ export class LobbyRoom extends Room<LobbyState> {
   }
 
   onLeave(client: Client) {
+    if (!this.state.players.has(client.sessionId)) {
+      this.clientsById.delete(client.sessionId);
+      console.log(`[lobby] settings observer left (${client.sessionId})`);
+      return;
+    }
+
     const player = this.state.players.get(client.sessionId);
     console.log(`[lobby] ${player?.name} left (${client.sessionId})`);
     this.state.players.delete(client.sessionId);

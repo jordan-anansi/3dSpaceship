@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>3dSpaceship &mdash; Server Settings</title>
+  <style>
+    :root {
+      --bg: #070a14;
+      --panel: #0f1526;
+      --panel-glow: rgba(15, 21, 38, 0.7);
+      --card: #141c33;
+      --card-hover: #192340;
+      --line: #222c4a;
+      --line-active: #3a4b7c;
+      --ink: #e2e8f8;
+      --dim: #7785aa;
+      --neon-cyan: #00e5ff;
+      --neon-green: #00ff66;
+      --neon-amber: #ffaa33;
+      --neon-pink: #ff3377;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 2rem 1rem;
+      background: radial-gradient(circle at 50% 10%, #151d38 0%, var(--bg) 70%);
+      color: var(--ink);
+      font-family: 'Consolas', 'Courier New', monospace;
+      display: flex;
+      justify-content: center;
+      min-height: 100vh;
+    }
+
+    main {
+      width: 100%;
+      max-width: 820px;
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 1rem;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+
+    .title-group {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .icon-logo {
+      font-size: 1.8rem;
+      text-shadow: 0 0 12px rgba(0, 229, 255, 0.6);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 1.4rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #fff;
+    }
+
+    .subtitle {
+      margin: 0.2rem 0 0;
+      font-size: 0.75rem;
+      color: var(--dim);
+    }
+
+    .header-links {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+    }
+
+    .nav-btn {
+      text-decoration: none;
+      font-size: 0.8rem;
+      padding: 0.4rem 0.8rem;
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      color: var(--neon-cyan);
+      transition: all 0.2s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+    .nav-btn:hover {
+      background: var(--card-hover);
+      border-color: var(--neon-cyan);
+      box-shadow: 0 0 10px rgba(0, 229, 255, 0.3);
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      padding: 0.35rem 0.75rem;
+      border-radius: 20px;
+      font-size: 0.75rem;
+      border: 1px solid var(--line);
+      background: rgba(15, 21, 38, 0.8);
+      font-weight: 500;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--dim);
+    }
+    .status-badge.connected .status-dot {
+      background: var(--neon-green);
+      box-shadow: 0 0 8px var(--neon-green);
+    }
+    .status-badge.connected {
+      border-color: rgba(0, 255, 102, 0.4);
+      color: var(--neon-green);
+    }
+    .status-badge.disconnected .status-dot {
+      background: var(--neon-pink);
+    }
+    .status-badge.disconnected {
+      border-color: rgba(255, 51, 119, 0.4);
+      color: var(--neon-pink);
+    }
+
+    /* Preset bar */
+    .section-presets {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 1rem 1.25rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+    .preset-title {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--neon-cyan);
+      font-weight: bold;
+    }
+    .preset-buttons {
+      display: flex;
+      gap: 0.6rem;
+      flex-wrap: wrap;
+    }
+    .preset-btn {
+      background: var(--card);
+      border: 1px solid var(--line);
+      color: var(--ink);
+      font-family: inherit;
+      font-size: 0.8rem;
+      padding: 0.45rem 0.85rem;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+    .preset-btn:hover {
+      border-color: var(--neon-cyan);
+      color: #fff;
+      transform: translateY(-1px);
+    }
+    .preset-btn.active {
+      border-color: var(--neon-green);
+      color: var(--neon-green);
+      background: rgba(0, 255, 102, 0.08);
+      box-shadow: 0 0 10px rgba(0, 255, 102, 0.2);
+    }
+
+    /* Settings grid */
+    .settings-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+    }
+    @media (max-width: 650px) {
+      .settings-grid { grid-template-columns: 1fr; }
+    }
+
+    .setting-card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 1rem 1.2rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.65rem;
+      transition: border-color 0.2s;
+    }
+    .setting-card:hover {
+      border-color: var(--line-active);
+    }
+
+    .setting-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+    }
+    .setting-name {
+      font-size: 0.85rem;
+      font-weight: bold;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+    .setting-badge {
+      font-size: 0.85rem;
+      font-weight: bold;
+      color: var(--neon-cyan);
+      background: rgba(0, 229, 255, 0.08);
+      padding: 0.15rem 0.5rem;
+      border-radius: 4px;
+      border: 1px solid rgba(0, 229, 255, 0.25);
+    }
+
+    .setting-desc {
+      font-size: 0.72rem;
+      color: var(--dim);
+      line-height: 1.4;
+      margin: 0;
+      min-height: 2rem;
+    }
+
+    .slider-row {
+      display: flex;
+      align-items: center;
+      gap: 0.8rem;
+    }
+    input[type=range] {
+      flex: 1;
+      height: 6px;
+      background: var(--card);
+      border-radius: 3px;
+      outline: none;
+      accent-color: var(--neon-cyan);
+      cursor: pointer;
+    }
+    input[type=number] {
+      width: 70px;
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 3px;
+      color: var(--ink);
+      font-family: inherit;
+      font-size: 0.85rem;
+      padding: 0.3rem 0.45rem;
+      text-align: right;
+    }
+    input[type=number]:focus {
+      outline: none;
+      border-color: var(--neon-cyan);
+    }
+
+    /* Footer actions */
+    .footer-actions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-top: 1px solid var(--line);
+      padding-top: 1.25rem;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+
+    .action-btn {
+      font-family: inherit;
+      font-size: 0.85rem;
+      padding: 0.55rem 1.1rem;
+      border-radius: 4px;
+      cursor: pointer;
+      border: 1px solid var(--line);
+      background: var(--card);
+      color: var(--ink);
+      transition: all 0.2s;
+    }
+    .action-btn:hover {
+      border-color: var(--neon-cyan);
+      color: var(--neon-cyan);
+    }
+    .action-btn.reset-btn:hover {
+      border-color: var(--neon-amber);
+      color: var(--neon-amber);
+    }
+
+    #live-indicator {
+      font-size: 0.75rem;
+      color: var(--dim);
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="title-group">
+        <span class="icon-logo">⚙️</span>
+        <div>
+          <h1>Live Server Settings</h1>
+          <p class="subtitle">Real-time simulation tuning over Colyseus WebSocket</p>
+        </div>
+      </div>
+
+      <div class="header-links">
+        <div id="status-badge" class="status-badge disconnected">
+          <span class="status-dot"></span>
+          <span id="status-text">Connecting...</span>
+        </div>
+        <a href="/" target="_blank" class="nav-btn" title="Open Game View">🚀 Game</a>
+        <a href="/explosion-lab.html" target="_blank" class="nav-btn" title="Open Explosion Lab">💥 Lab</a>
+      </div>
+    </header>
+
+    <!-- Presets bar -->
+    <section class="section-presets">
+      <div class="preset-title">Instant Flight Model Presets</div>
+      <div class="preset-buttons">
+        <button type="button" class="preset-btn" data-preset="standard">
+          <span>🎯 Standard Balance</span>
+        </button>
+        <button type="button" class="preset-btn" data-preset="arcade">
+          <span>⚡ High-Speed Arcade</span>
+        </button>
+        <button type="button" class="preset-btn" data-preset="inertia">
+          <span>🪐 Zero-G Drift (Newtonian)</span>
+        </button>
+        <button type="button" class="preset-btn" data-preset="tactical">
+          <span>🛡️ Heavy & Tactical</span>
+        </button>
+      </div>
+    </section>
+
+    <!-- Sliders Grid -->
+    <section class="settings-grid">
+      <!-- Max Speed -->
+      <div class="setting-card">
+        <div class="setting-header">
+          <span class="setting-name">🚀 Max Cruise Speed</span>
+          <span id="badge-maxSpeed" class="setting-badge">70 u/s</span>
+        </div>
+        <p class="setting-desc">Base speed ceiling along all axes (W/S forward/back & A/D strafe left/right).</p>
+        <div class="slider-row">
+          <input id="slider-maxSpeed" type="range" min="20" max="300" step="2" value="70" />
+          <input id="num-maxSpeed" type="number" min="20" max="300" step="2" value="70" />
+        </div>
+      </div>
+
+      <!-- Thrust Acceleration -->
+      <div class="setting-card">
+        <div class="setting-header">
+          <span class="setting-name">🔥 Thrust Acceleration</span>
+          <span id="badge-thrustAccel" class="setting-badge">0.18</span>
+        </div>
+        <p class="setting-desc">How rapidly thrusters accelerate the hull towards max speed when holding movement keys.</p>
+        <div class="slider-row">
+          <input id="slider-thrustAccel" type="range" min="0.05" max="1.0" step="0.01" value="0.18" />
+          <input id="num-thrustAccel" type="number" min="0.05" max="1.0" step="0.01" value="0.18" />
+        </div>
+      </div>
+
+      <!-- Linear Drag -->
+      <div class="setting-card">
+        <div class="setting-header">
+          <span class="setting-name">🛑 Linear Drag</span>
+          <span id="badge-drag" class="setting-badge">0.15</span>
+        </div>
+        <p class="setting-desc">Velocity decay per second. Set to 0.00 for pure frictionless coasting / infinite drift.</p>
+        <div class="slider-row">
+          <input id="slider-drag" type="range" min="0.00" max="1.50" step="0.01" value="0.15" />
+          <input id="num-drag" type="number" min="0.00" max="1.50" step="0.01" value="0.15" />
+        </div>
+      </div>
+
+      <!-- Dash Impulse -->
+      <div class="setting-card">
+        <div class="setting-header">
+          <span class="setting-name">⚡ Dash Impulse</span>
+          <span id="badge-dashImpulse" class="setting-badge">38 u/s</span>
+        </div>
+        <p class="setting-desc">Instantaneous velocity kick added when spending a Juice Capacitor charge (Shift key).</p>
+        <div class="slider-row">
+          <input id="slider-dashImpulse" type="range" min="10" max="150" step="1" value="38" />
+          <input id="num-dashImpulse" type="number" min="10" max="150" step="1" value="38" />
+        </div>
+      </div>
+
+      <!-- Base Hull -->
+      <div class="setting-card">
+        <div class="setting-header">
+          <span class="setting-name">🛡️ Starting Hull</span>
+          <span id="badge-baseHull" class="setting-badge">100 HP</span>
+        </div>
+        <p class="setting-desc">Starting maximum hull points for all ships prior to shop armor upgrades.</p>
+        <div class="slider-row">
+          <input id="slider-baseHull" type="range" min="20" max="500" step="5" value="100" />
+          <input id="num-baseHull" type="number" min="20" max="500" step="5" value="100" />
+        </div>
+      </div>
+
+      <!-- Bot Combatants -->
+      <div class="setting-card">
+        <div class="setting-header">
+          <span class="setting-name">🤖 Bot Combatants</span>
+          <span id="badge-botCount" class="setting-badge">4 bots</span>
+        </div>
+        <p class="setting-desc">Target ship count filled by AI combat bots during combat rounds.</p>
+        <div class="slider-row">
+          <input id="slider-botCount" type="range" min="0" max="8" step="1" value="4" />
+          <input id="num-botCount" type="number" min="0" max="8" step="1" value="4" />
+        </div>
+      </div>
+    </section>
+
+    <!-- Footer Actions -->
+    <div class="footer-actions">
+      <div id="live-indicator">
+        <span>🔄 Changes sync instantly to active matches</span>
+      </div>
+      <button id="reset-defaults-btn" type="button" class="action-btn reset-btn">
+        ↺ Reset to Defaults
+      </button>
+    </div>
+  </main>
+
+  <script src="/lib/colyseus.js"></script>
+  <script>
+    const PRESETS = {
+      standard: {
+        maxSpeed: 70,
+        thrustAccel: 0.18,
+        drag: 0.15,
+        dashImpulse: 38,
+        baseHull: 100,
+        botCount: 4,
+      },
+      arcade: {
+        maxSpeed: 130,
+        thrustAccel: 0.35,
+        drag: 0.30,
+        dashImpulse: 65,
+        baseHull: 120,
+        botCount: 4,
+      },
+      inertia: {
+        maxSpeed: 100,
+        thrustAccel: 0.12,
+        drag: 0.02,
+        dashImpulse: 45,
+        baseHull: 100,
+        botCount: 4,
+      },
+      tactical: {
+        maxSpeed: 45,
+        thrustAccel: 0.10,
+        drag: 0.22,
+        dashImpulse: 25,
+        baseHull: 200,
+        botCount: 4,
+      }
+    };
+
+    const statusBadge = document.getElementById('status-badge');
+    const statusText = document.getElementById('status-text');
+    const liveIndicator = document.getElementById('live-indicator');
+
+    const fields = [
+      { key: 'maxSpeed', fmt: (v) => `${Math.round(v)} u/s` },
+      { key: 'thrustAccel', fmt: (v) => Number(v).toFixed(2) },
+      { key: 'drag', fmt: (v) => Number(v).toFixed(2) },
+      { key: 'dashImpulse', fmt: (v) => `${Math.round(v)} u/s` },
+      { key: 'baseHull', fmt: (v) => `${Math.round(v)} HP` },
+      { key: 'botCount', fmt: (v) => `${Math.round(v)} bots` },
+    ];
+
+    let room = null;
+    let localPending = {};
+    let debounceTimer = null;
+
+    function sendPendingSettings() {
+      if (!room || Object.keys(localPending).length === 0) return;
+      room.send('setServerSettings', localPending);
+      localPending = {};
+      if (liveIndicator) {
+        liveIndicator.textContent = '✅ Synced to game server!';
+        setTimeout(() => {
+          liveIndicator.textContent = '🔄 Changes sync instantly to active matches';
+        }, 1500);
+      }
+    }
+
+    function queueSettingChange(key, value) {
+      localPending[key] = value;
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(sendPendingSettings, 60);
+    }
+
+    fields.forEach(({ key, fmt }) => {
+      const slider = document.getElementById(`slider-${key}`);
+      const numInput = document.getElementById(`num-${key}`);
+      const badge = document.getElementById(`badge-${key}`);
+
+      function applyLocal(val, triggerSend) {
+        const num = parseFloat(val);
+        if (Number.isNaN(num)) return;
+        if (slider && slider.value != num) slider.value = num;
+        if (numInput && numInput.value != num) numInput.value = num;
+        if (badge) badge.textContent = fmt(num);
+        if (triggerSend) queueSettingChange(key, num);
+      }
+
+      slider?.addEventListener('input', (e) => applyLocal(e.target.value, true));
+      numInput?.addEventListener('input', (e) => applyLocal(e.target.value, true));
+      numInput?.addEventListener('change', (e) => applyLocal(e.target.value, true));
+    });
+
+    document.querySelectorAll('.preset-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const presetKey = btn.dataset.preset;
+        const preset = PRESETS[presetKey];
+        if (!preset) return;
+
+        document.querySelectorAll('.preset-btn').forEach((b) => b.classList.remove('active'));
+        btn.classList.add('active');
+
+        Object.entries(preset).forEach(([key, val]) => {
+          const slider = document.getElementById(`slider-${key}`);
+          const numInput = document.getElementById(`num-${key}`);
+          const badge = document.getElementById(`badge-${key}`);
+          const fieldDef = fields.find((f) => f.key === key);
+          if (slider) slider.value = val;
+          if (numInput) numInput.value = val;
+          if (badge && fieldDef) badge.textContent = fieldDef.fmt(val);
+        });
+
+        if (room) {
+          room.send('setServerSettings', preset);
+          if (liveIndicator) {
+            liveIndicator.textContent = `✅ Applied preset: ${btn.textContent.trim()}`;
+            setTimeout(() => {
+              liveIndicator.textContent = '🔄 Changes sync instantly to active matches';
+            }, 1800);
+          }
+        }
+      });
+    });
+
+    document.getElementById('reset-defaults-btn')?.addEventListener('click', () => {
+      const std = PRESETS.standard;
+      document.querySelectorAll('.preset-btn').forEach((b) => b.classList.remove('active'));
+      const stdBtn = document.querySelector('[data-preset="standard"]');
+      if (stdBtn) stdBtn.classList.add('active');
+
+      Object.entries(std).forEach(([key, val]) => {
+        const slider = document.getElementById(`slider-${key}`);
+        const numInput = document.getElementById(`num-${key}`);
+        const badge = document.getElementById(`badge-${key}`);
+        const fieldDef = fields.find((f) => f.key === key);
+        if (slider) slider.value = val;
+        if (numInput) numInput.value = val;
+        if (badge && fieldDef) badge.textContent = fieldDef.fmt(val);
+      });
+      if (room) room.send('setServerSettings', std);
+    });
+
+    // Connect as observer
+    async function connect() {
+      const WS_PROTO = location.protocol === 'https:' ? 'wss' : 'ws';
+      const client = new Colyseus.Client(`${WS_PROTO}://${location.host}`);
+
+      try {
+        statusBadge.className = 'status-badge';
+        statusText.textContent = 'Connecting...';
+        room = await client.joinOrCreate('lobby', { isSettings: true });
+
+        statusBadge.className = 'status-badge connected';
+        statusText.textContent = 'Connected (Live)';
+
+        fields.forEach(({ key, fmt }) => {
+          room.state.listen(key, (value) => {
+            if (value === undefined || value === null) return;
+            const slider = document.getElementById(`slider-${key}`);
+            const numInput = document.getElementById(`num-${key}`);
+            const badge = document.getElementById(`badge-${key}`);
+            if (slider && document.activeElement !== slider) slider.value = value;
+            if (numInput && document.activeElement !== numInput) numInput.value = value;
+            if (badge) badge.textContent = fmt(value);
+          });
+        });
+
+        room.onLeave(() => {
+          statusBadge.className = 'status-badge disconnected';
+          statusText.textContent = 'Disconnected';
+          setTimeout(connect, 2000);
+        });
+      } catch (err) {
+        console.warn('Failed to connect to lobby for settings', err);
+        statusBadge.className = 'status-badge disconnected';
+        statusText.textContent = 'Offline (Retrying...)';
+        setTimeout(connect, 3000);
+      }
+    }
+
+    connect();
+  </script>
+</body>
+</html>
+

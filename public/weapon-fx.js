@@ -340,20 +340,9 @@ const DEATH_LIFE = 0.9;       // seconds of debris flight
 const DEATH_SHARDS = 14;
 const deathShardGeometry = new THREE.TetrahedronGeometry(0.5);
 
-/** A wreck coming apart: core flash, shockwave shell, and tumbling debris. */
+/** A wreck coming apart: tumbling debris shards (expanding sphere removed in favor of particle system). */
 function createDeathBlast(radius) {
   const group = new THREE.Group();
-  const shared = { transparent: true, depthWrite: false, blending: THREE.AdditiveBlending };
-
-  const core = new THREE.Mesh(
-    blastGeometry,
-    new THREE.MeshBasicMaterial({ color: 0xfff1cc, ...shared })
-  );
-  const wave = new THREE.Mesh(
-    blastGeometry,
-    new THREE.MeshBasicMaterial({ color: 0xff9a3c, side: THREE.BackSide, ...shared })
-  );
-  group.add(core, wave);
 
   // Debris directions are rolled once, here, and then flown analytically off
   // `age` in updateDeathBlast — same discipline as the shots, so nothing has
@@ -378,25 +367,16 @@ function createDeathBlast(radius) {
 
 function updateDeathBlast(group, radius, age) {
   const t = Math.min(1, age / DEATH_LIFE);
-  const [core, wave] = group.children;
 
-  // The core is brief and bright; the wave outruns it and keeps going. The
-  // two separating is what sells an explosion rather than a flash.
-  const coreK = Math.max(0, 1 - age / 0.28);
-  core.scale.setScalar(radius * (0.25 + 0.5 * (1 - coreK)));
-  core.material.opacity = 0.9 * coreK * coreK;
-
-  const waveK = 1 - (1 - t) ** 3;
-  wave.scale.setScalar(radius * (0.2 + 1.5 * waveK));
-  wave.material.opacity = 0.45 * (1 - t) ** 2;
-
-  for (let i = 2; i < group.children.length; i++) {
+  for (let i = 0; i < group.children.length; i++) {
     const shard = group.children[i];
     const { velocity, spin } = shard.userData;
     shard.position.copy(velocity).multiplyScalar(age);
     shard.rotation.set(spin.x * age, spin.y * age, spin.z * age);
   }
-  group.userData.shardMaterial.opacity = Math.max(0, 1 - t) ** 1.5;
+  if (group.userData?.shardMaterial) {
+    group.userData.shardMaterial.opacity = Math.max(0, 1 - t) ** 1.5;
+  }
 }
 
 export function createBlast(radius, kind) {
@@ -421,15 +401,11 @@ export function updateBlast(mesh, radius, age, kind) {
 }
 
 export function disposeBlast(mesh) {
-  // A death blast is a group whose children share two per-instance materials
-  // plus one shared shard material; a burst is a single mesh owning one.
   if (mesh.isGroup) {
-    mesh.children[0].material.dispose();
-    mesh.children[1].material.dispose();
-    mesh.userData.shardMaterial.dispose();
+    mesh.userData?.shardMaterial?.dispose();
     return;
   }
-  mesh.material.dispose();
+  mesh.material?.dispose();
 }
 
 /** Release the module-level geometry/material singletons on teardown. */

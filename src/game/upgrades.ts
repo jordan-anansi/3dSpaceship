@@ -28,15 +28,6 @@ export interface Stats {
 const SHIP_CARDS: CatalogEntry[] = [
   // --- technologies ---
   {
-    id: 'lateral',
-    name: 'Lateral Thrusters',
-    kind: 'tech',
-    blurb: () => 'a/d strafe. Sideways thrust at 55% of forward power.',
-    maxTier: 1,
-    baseCost: 120,
-    costMult: 1,
-  },
-  {
     id: 'juice',
     name: 'Juice Capacitor',
     kind: 'tech',
@@ -54,7 +45,7 @@ const SHIP_CARDS: CatalogEntry[] = [
     // Worth spelling out on the card: this is a cap on the projection of
     // velocity onto your input, so it raises the carving ceiling too, not
     // just the straight line.
-    blurb: (t) => `Cruise speed ${MAX_WISH + 6 * (t - 1)} → ${MAX_WISH + 6 * t}. Carving ceiling rises with it.`,
+    blurb: (t) => `Cruise speed +${6 * t} u/s. Carving ceiling rises with it.`,
     maxTier: 4,
     baseCost: 80,
     costMult: 1.6,
@@ -72,20 +63,10 @@ const SHIP_CARDS: CatalogEntry[] = [
     id: 'plating',
     name: 'Hull Plating',
     kind: 'upgrade',
-    blurb: (t) => `Max hull ${BASE_HULL + 30 * (t - 1)} → ${BASE_HULL + 30 * t}.`,
+    blurb: (t) => `Max hull +${30 * t}.`,
     maxTier: 4,
     baseCost: 90,
     costMult: 1.6,
-  },
-  {
-    id: 'lateralPower',
-    name: 'Lateral Power',
-    kind: 'upgrade',
-    blurb: (t) => `Strafe thrust ${Math.round((0.55 + 0.225 * (t - 1)) * 100)}% → ${Math.round((0.55 + 0.225 * t) * 100)}% of forward.`,
-    maxTier: 2,
-    baseCost: 120,
-    costMult: 1.5,
-    requires: 'lateral',
   },
   {
     id: 'juiceCap',
@@ -117,18 +98,26 @@ const byId = new Map(CATALOG.map((entry) => [entry.id, entry]));
 
 export const entryFor = (id: string) => byId.get(id);
 
+export interface BaseWorldSettings {
+  maxSpeed?: number;
+  thrustAccel?: number;
+  baseHull?: number;
+}
+
 /** Collapse owned tiers into the numbers the simulation actually reads. */
-export function statsFor(player: Player): Stats {
-  const lateral = tierOf(player, 'lateral');
+export function statsFor(player: Player, baseSettings?: BaseWorldSettings): Stats {
+  const baseSpeed = baseSettings?.maxSpeed ?? MAX_WISH;
+  const baseAccel = baseSettings?.thrustAccel ?? THRUST_ACCEL;
+  const baseHull = baseSettings?.baseHull ?? BASE_HULL;
   const juice = tierOf(player, 'juice');
   return {
-    wishSpeed: WISH_SPEED,
-    maxWish: MAX_WISH + 6 * tierOf(player, 'overdrive'),
-    thrustAccel: THRUST_ACCEL + 0.06 * tierOf(player, 'reactor'),
-    maxHull: BASE_HULL + 30 * tierOf(player, 'plating'),
+    wishSpeed: baseSpeed,
+    maxWish: baseSpeed + 6 * tierOf(player, 'overdrive'),
+    thrustAccel: baseAccel + 0.06 * tierOf(player, 'reactor'),
+    maxHull: baseHull + 30 * tierOf(player, 'plating'),
     juiceMax: juice ? JUICE_MAX + tierOf(player, 'juiceCap') : 0,
     juiceRegenSec: Math.max(1.5, JUICE_REGEN_SEC - 1.2 * tierOf(player, 'juiceRegen')),
-    strafeScale: lateral ? Math.min(1, 0.55 + 0.225 * tierOf(player, 'lateralPower')) : 0,
+    strafeScale: 1.0, // A/D thrusts at 100% full power identical to W/S
   };
 }
 
@@ -136,11 +125,16 @@ export function statsFor(player: Player): Stats {
 // and on join, so `maxHull` / `juiceMax` on the wire are always current.
 // Buying capacity tops you up by the amount gained rather than refilling —
 // a mid-run Hull Plating shouldn't double as a free repair.
-export function applyStats(player: Player) {
-  const stats = statsFor(player);
-  const hullGain = stats.maxHull - player.maxHull;
-  player.maxHull = stats.maxHull;
-  player.hull = Math.min(stats.maxHull, player.hull + Math.max(0, hullGain));
+export function applyStats(player: Player, baseSettings?: BaseWorldSettings) {
+  const stats = statsFor(player, baseSettings);
+  if (player.godMode) {
+    player.maxHull = 99999;
+    player.hull = 99999;
+  } else {
+    const hullGain = stats.maxHull - player.maxHull;
+    player.maxHull = stats.maxHull;
+    player.hull = Math.min(stats.maxHull, player.hull + Math.max(0, hullGain));
+  }
   const juiceGain = stats.juiceMax - player.juiceMax;
   player.juiceMax = stats.juiceMax;
   player.juice = Math.min(stats.juiceMax, player.juice + Math.max(0, juiceGain));

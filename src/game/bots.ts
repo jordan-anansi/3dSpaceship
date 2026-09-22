@@ -3,7 +3,8 @@ import { Quaternion, Vector3 } from 'three';
 import { Player } from './schema';
 import { applyStats } from './upgrades';
 import {
-  ASTEROID_FIELD, LOCAL_FORWARD, LOCAL_RIGHT, SPAWN_RADIUS, TICK_DT, asteroidCenters,
+  ASTEROID_FIELD, BOT_AIM_JITTER_BASE, BOT_AIM_JITTER_PER_UNIT, LOCAL_FORWARD, LOCAL_RIGHT,
+  SPAWN_RADIUS, TICK_DT, asteroidCenters,
 } from './tuning';
 import { BOLT_SPEED } from './weapons';
 
@@ -32,14 +33,12 @@ const RANGE_FAR = 95;
 const JINK_SEC = 1.1;          // how often the orbit direction flips
 
 // --- aim error ---
-// Two parts, and the split is the point:
-//   BASE     — a floor, so point-blank is never a guaranteed hit.
-//   PER_UNIT — grows with range. An absolute-only offset does the OPPOSITE
-//              of what you'd expect: the same 4 units of error is a wide
-//              miss at 20 units and a rounding error at 400, which makes
-//              bots most lethal exactly where a player can least react.
-const AIM_JITTER_BASE = 1.9;
-const AIM_JITTER_PER_UNIT = 0.035;
+// Re-rolled on its own short timer, deliberately NOT tied to the jink. One
+// offset held across a whole burst means every shot in that burst hits or
+// every shot misses — which reads as the bot randomly being a crack shot
+// rather than as spray.
+const AIM_JITTER_BASE = BOT_AIM_JITTER_BASE;
+const AIM_JITTER_PER_UNIT = BOT_AIM_JITTER_PER_UNIT;
 // Re-rolled on its own short timer, deliberately NOT tied to the jink. One
 // offset held across a whole burst means every shot in that burst hits or
 // every shot misses — which reads as the bot randomly being a crack shot
