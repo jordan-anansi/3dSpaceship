@@ -1069,8 +1069,11 @@ const ui = {
   fpsTag: document.getElementById('fps-tag'),
   openSettingsBtn: document.getElementById('open-settings-btn'),
   openExpLabBtn: document.getElementById('open-exp-lab-btn'),
+  openAttribBtn: document.getElementById('open-attrib-btn'),
+  joinAttribBtn: document.getElementById('join-attrib-btn'),
   overlaySettingsBtn: document.getElementById('overlay-settings-btn'),
   overlayLabBtn: document.getElementById('overlay-lab-btn'),
+  overlayAttribBtn: document.getElementById('overlay-attrib-btn'),
 };
 
 // --- hit confirmation -----------------------------------------------------
@@ -1166,10 +1169,20 @@ function openExplosionLabTab() {
   window.open('/explosion-lab.html', '_blank');
 }
 
+function openAttributionsTab() {
+  if (document.pointerLockElement) {
+    document.exitPointerLock?.();
+  }
+  window.open('/attributions.html', '_blank');
+}
+
 ui.openSettingsBtn?.addEventListener('click', openSettingsTab);
 ui.openExpLabBtn?.addEventListener('click', openExplosionLabTab);
+ui.openAttribBtn?.addEventListener('click', openAttributionsTab);
+ui.joinAttribBtn?.addEventListener('click', openAttributionsTab);
 ui.overlaySettingsBtn?.addEventListener('click', openSettingsTab);
 ui.overlayLabBtn?.addEventListener('click', openExplosionLabTab);
+ui.overlayAttribBtn?.addEventListener('click', openAttributionsTab);
 
 const mmss = (seconds) => {
   const s = Math.max(0, Math.ceil(seconds));
