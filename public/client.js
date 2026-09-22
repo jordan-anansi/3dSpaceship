@@ -214,17 +214,36 @@ window.addEventListener('keyup', (e) => {
   if (TRACKED.has(key)) { held.delete(key); sendInput(); }
 });
 
-// Mouse wheel dials the fuse distance for weapons that detonate at a set
-// range. Tracked optimistically so the readout responds instantly; the server
-// clamps and replicates the authoritative value back.
+// Camera FOV zoom (45° to 120°): scrolled with mouse wheel when pointer locked.
+const BASE_FOV = 70;
+const MIN_FOV = 45;
+const MAX_FOV = 120;
+const FOV_STEP = 5;
+let targetFov = BASE_FOV;
+let currentBaseFov = BASE_FOV;
+
+// Weapons that detonate at a set range (e.g. flak) can dial fuse with Alt+wheel or Ctrl+wheel.
 let fuse = 40;
 const FUSE_STEP = 5;
 window.addEventListener('wheel', (e) => {
   if (!currentRoom || document.pointerLockElement !== gameCanvas) return;
   e.preventDefault();
-  fuse = Math.max(5, Math.min(200, fuse - Math.sign(e.deltaY) * FUSE_STEP));
-  currentRoom.send('setFuse', fuse);
+
+  const me = currentRoom.state?.players?.get(currentRoom.sessionId);
+  if ((e.altKey || e.ctrlKey) && me?.weapon === 'flak') {
+    fuse = Math.max(5, Math.min(200, fuse - Math.sign(e.deltaY) * FUSE_STEP));
+    currentRoom.send('setFuse', fuse);
+    return;
+  }
+
+  // Scroll up (deltaY < 0): zoom in -> smaller FOV (down to 45°)
+  // Scroll down (deltaY > 0): zoom out -> wider FOV (up to 120°)
+  const delta = Math.abs(e.deltaY) >= 50
+    ? Math.sign(e.deltaY) * FOV_STEP
+    : (e.deltaY / 100) * FOV_STEP;
+  targetFov = Math.max(MIN_FOV, Math.min(MAX_FOV, targetFov + delta));
 }, { passive: false });
+
 
 // --- optimistic look: our own orientation, applied locally the instant the
 // input happens and reproduced by the server from the same batches ---
@@ -267,6 +286,12 @@ const gameCanvas = document.getElementById('game');
 // click that grabs the mouse is the player saying "let me in", not "shoot" —
 // firing on it would put a shot downrange before they'd even seen the frame.
 gameCanvas.addEventListener('mousedown', (e) => {
+  if (e.button === 1) {
+    // Middle click resets zoom to default 70°
+    e.preventDefault();
+    targetFov = BASE_FOV;
+    return;
+  }
   if (e.button !== 0) return;
   if (!currentRoom) return;
   const phase = currentRoom.state?.phase;
@@ -278,6 +303,9 @@ gameCanvas.addEventListener('mousedown', (e) => {
   }
   e.preventDefault();
   pullTrigger('mouse');
+});
+window.addEventListener('auxclick', (e) => {
+  if (e.button === 1) e.preventDefault();
 });
 window.addEventListener('mouseup', (e) => { if (e.button === 0) releaseTrigger('mouse'); });
 let lookDX = 0, lookDY = 0;
@@ -479,7 +507,6 @@ function renderJuice(juice) {
 // vision, not looked at.
 const vignetteEl = document.getElementById('vignette');
 const speedlinesEl = document.getElementById('speedlines');
-const BASE_FOV = 70;
 const FOV_GAIN = 6;        // degrees of extra FOV at full speed
 // Doubled with MAX_WISH in src/game/tuning.ts. These are absolute speeds, so
 // at the old values the FOV kick and vignette would sit pinned at full the
@@ -504,11 +531,14 @@ function noteJuice(juice) {
 }
 
 function renderSpeedFx(camera, canvas, speed, dt) {
+  // Smoothly interpolate currentBaseFov towards targetFov for fluid zooming
+  currentBaseFov += (targetFov - currentBaseFov) * Math.min(1, dt * 15);
+
   // smoothed: velocity is only patched in at the server's rate, and feeding
   // that to the FOV raw makes it judder
   const target = Math.min(1, Math.max(0, (speed - SPEED_FX_LO) / (SPEED_FX_HI - SPEED_FX_LO)));
   speedFx += (target - speedFx) * Math.min(1, dt * 6);
-  const fov = BASE_FOV + FOV_GAIN * speedFx;
+  const fov = currentBaseFov + FOV_GAIN * speedFx;
   if (Math.abs(fov - camera.fov) > 0.01) {
     camera.fov = fov;
     camera.updateProjectionMatrix();
@@ -1298,7 +1328,7 @@ function renderWeapons(me) {
   });
   // the fuse readout is only meaningful to weapons that detonate at a range
   ui.fuseTag.classList.toggle('hidden', me.weapon !== 'flak');
-  ui.fuseTag.textContent = `fuse ${Math.round(me.fuse)} · wheel to adjust`;
+  ui.fuseTag.textContent = `fuse ${Math.round(me.fuse)} · alt+wheel to adjust`;
 
   // Ram cooldown. Shown whenever you OWN the ram, not only while it's
   // selected: the whole point of a five-second lockout is planning around
@@ -1317,6 +1347,8 @@ function renderHint(me) {
   const parts = [
     'click canvas to capture mouse',
     'mouse: yaw/pitch',
+    'wheel: zoom',
+    'middle click: reset zoom',
     'q/e: roll',
     'wasd: move',
   ];
@@ -1667,7 +1699,7 @@ async function startGame(room) {
 
   // far plane has to clear the star sphere at 16,000 km; the log buffer above
   // is what makes a range this wide survivable
-  const camera = new THREE.PerspectiveCamera(70, canvas.clientWidth / canvas.clientHeight, 0.1, 25000000);
+  const camera = new THREE.PerspectiveCamera(BASE_FOV, canvas.clientWidth / canvas.clientHeight, 0.1, 25000000);
 
   // Canvas size changes on window resize AND on entering/leaving fullscreen;
   // without this the projection keeps the old aspect and everything stretches.
