@@ -519,7 +519,7 @@ function makeJupiterTexture(w = 512, h = 256) {
 // 2.2-unit sphere, and a 2.4-long hull inside it means half the shots that
 // register land visibly off the model. Drawing the ship at the size it is
 // actually hit at is also most of "make ships more visible" — at 2.4 units
-// in a 2,700-unit arena an enemy is a speck almost everywhere.
+// in a 2,400-unit arena an enemy is a speck almost everywhere.
 const SHIP_LENGTH = 4.4;
 const shipTemplatePromise = new GLTFLoader().loadAsync('/models/orion.glb')
   .then((gltf) => {
@@ -603,6 +603,15 @@ const asteroidTemplatePromise = new GLTFLoader().loadAsync('/models/asteroid.glb
 //
 // The multiply stays exact in a double: s < 2^32 and 1664525 < 2^21, so the
 // product is under 2^53. That exactness is what makes both sides agree.
+// How far out the belt reaches, as a multiple of the extent it had before the
+// arena was tightened. DUPLICATED from BELT_SCALE in src/game/tuning.ts, and
+// the EXPRESSIONS it appears in below must match that file character for
+// character — `rnd() * 2600 * BELT_SCALE` and `rnd() * 2262` are different
+// doubles, and either side rounding differently puts the rocks you see in
+// different places from the ones the server collides you against.
+// The reasoning behind 0.87 (density × 1.5, not extent × 2/3) lives there.
+const BELT_SCALE = 0.87;
+
 function generateAsteroidField(count = 100) {
   let s = 987654321;
   const rnd = () => {
@@ -620,8 +629,8 @@ function generateAsteroidField(count = 100) {
     // monolith can never engulf the spawn sphere (SPAWN_RADIUS = 60, and the
     // nearest possible rock surface sits at 120 + 1.6r - r > 120).
     const angle = rnd() * Math.PI * 2;
-    const dist = 120 + r * 1.6 + rnd() * 2600;
-    const height = (rnd() - 0.5) * (500 + r * 0.8);
+    const dist = 120 + r * 1.6 + rnd() * 2600 * BELT_SCALE;
+    const height = (rnd() - 0.5) * (500 + r * 0.8) * BELT_SCALE;
     const p0 = [Math.cos(angle) * dist, height, Math.sin(angle) * dist];
 
     // Mass stands in for inertia: the bigger the rock, the slower it drifts
@@ -1353,7 +1362,7 @@ function renderRoster(players, myId, listItems) {
 //   3. A 1px border stays 1px at any resolution, where a textured quad goes
 //      soft the moment it's scaled up.
 //
-// A ship is ~2.4 units long in an arena 2,700 units across, so past a couple
+// A ship is ~2.4 units long in an arena 2,400 units across, so past a couple
 // hundred units it's sub-pixel. The box is sized from the hull's true
 // projected size with a pixel floor, so it tracks the ship when close and
 // degrades into a findable marker when far.

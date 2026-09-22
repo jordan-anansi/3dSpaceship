@@ -26,7 +26,7 @@ import { Quaternion, Vector3 } from 'three';
 // Speed perpendicular to your input is invisible to MAX_WISH, so turning is
 // how you gain speed: straight-line flight settles at MAX_WISH, but a carved
 // turn keeps the old component and adds a fresh one on a new axis.
-// Doubled from 40 when the arena grew: the belt runs from 207 to ~2,700
+// Doubled from 40 when the arena grew: the belt runs from 207 to ~2,400
 // units out, and at the old cruise speed crossing it was a minute of holding
 // W. Both moved together on purpose — WISH_SPEED is the push and MAX_WISH is
 // the ceiling, so raising only the ceiling would have kept the same
@@ -88,7 +88,7 @@ export const SPEED_RAIL = 300;
 //
 // 2.2 is deliberately GENEROUS against a hull that's about 2.4 units long,
 // i.e. a true radius near 1.2. Ships cross at a combined 160 units/s in an
-// arena 2,700 units across, and at those closing speeds a physically honest
+// arena 2,400 units across, and at those closing speeds a physically honest
 // sphere means most well-aimed shots register as misses. The hull model is
 // scaled up to match in public/client.js (SHIP_BOUND_RADIUS and the GLB
 // normalizer) so what you shoot at is what you see.
@@ -202,6 +202,24 @@ export interface Rock {
   seed: number;
 }
 
+// The belt IS the play space — there are no walls, so how far out the rocks
+// go is the whole extent of the arena. This shrinks it without deleting any
+// rocks: the count stays at 100 and only the volume they're spread through
+// moves, which is what makes the field busier rather than emptier.
+//
+// Crowding is a DENSITY figure — rocks you meet per unit of flight path —
+// so "50% more crowded" is volume × 1/1.5, NOT extent × 1/1.5. Scaling the
+// extent to two-thirds would have tripled the density, not raised it by half.
+// The belt is an annular shell, V ≈ π(Rout² − Rin²)·H, so scaling the radial
+// span and the height together by 0.87 lands on two-thirds of the volume:
+//   Rout 2,720 → 2,382, H 592 → 515, V → 0.667·V_old, density → 1.50×
+//
+// It multiplies the RANDOM span only, never the 120 + 1.6r inner offset —
+// that offset is what keeps a monolith off the spawn sphere (see below), and
+// scaling it would pull the giants inward toward spawn, which is the one
+// place the field must stay clear.
+export const BELT_SCALE = 0.87;
+
 export function generateAsteroidField(count = 100): Rock[] {
   let s = 987654321;
   const rnd = () => {
@@ -219,8 +237,8 @@ export function generateAsteroidField(count = 100): Rock[] {
     // monolith can never engulf the spawn sphere (SPAWN_RADIUS = 60, and the
     // nearest possible rock surface sits at 120 + 1.6r - r > 120).
     const angle = rnd() * Math.PI * 2;
-    const dist = 120 + r * 1.6 + rnd() * 2600;
-    const height = (rnd() - 0.5) * (500 + r * 0.8);
+    const dist = 120 + r * 1.6 + rnd() * 2600 * BELT_SCALE;
+    const height = (rnd() - 0.5) * (500 + r * 0.8) * BELT_SCALE;
     const p0: [number, number, number] = [
       Math.cos(angle) * dist,
       height,

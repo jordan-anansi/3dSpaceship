@@ -704,7 +704,7 @@ export class LobbyRoom extends Room<LobbyState> {
       const r2 = r * r;
       const distSq = cx * cx + cy * cy + cz * cz;
       if (distSq <= r2) return 0; // already inside the rock
-      // broad phase: the belt is 2700 units across, so most rocks are nowhere
+      // broad phase: the belt is 2400 units across, so most rocks are nowhere
       // near any given ray and this one compare rejects them
       const reach = maxDist + r;
       if (distSq > reach * reach) continue;
