@@ -3,7 +3,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import {
   SHOT_FX, createBlast, disposeBlast, disposeFx, updateBlast,
 } from './weapon-fx.js';
-import { initAudio, play as playSound, toggleMute } from './audio.js';
+import { initAudio, play as playSound, toggleMute, startEngineLoop, stopEngineLoop } from './audio.js';
 import {
   getActiveExplosionConfig,
   spawnOneShotExplosion,
@@ -1380,12 +1380,23 @@ function renderHint(me) {
  * per frame: none of this needs 60Hz, and rebuilding cards that often would
  * make them unclickable.
  */
+let lastAudioPhase = null;
 function syncUi(room) {
   const state = room.state;
   const me = state.players?.get(room.sessionId);
   if (!me) return;
   const phase = state.phase;
   const inCombat = phase === 'combat';
+
+  // Engine sound begins at game start (lobby/combat) and runs uninterrupted until round ends (intermission/shop)
+  if (phase !== lastAudioPhase) {
+    if (phase === 'combat' || phase === 'lobby') {
+      startEngineLoop();
+    } else if (phase === 'intermission' || phase === 'shop') {
+      stopEngineLoop();
+    }
+    lastAudioPhase = phase;
+  }
 
   // --- overlay ---
   const showOverlay = !inCombat;
@@ -1662,8 +1673,12 @@ async function startGame(room) {
   const coarseGrid = new THREE.GridHelper(3000, 60, 0x2a3260, 0x151c38); // 50 units/cell
   coarseGrid.position.y = -0.05;
   gridGroup.add(fineGrid, coarseGrid);
+  gridGroup.visible = false; // Turned off by default; press 'g' to toggle on
   scene.add(gridGroup);
   activeGrid = gridGroup;
+
+  // Start engine loop as soon as the 3D display begins
+  startEngineLoop();
 
   const distantStars = makeDistantStars();
   scene.add(distantStars);
@@ -1931,6 +1946,7 @@ async function startGame(room) {
     running = false;
     currentRoom = null;
     activeGrid = null;
+    stopEngineLoop();
     held.clear();
     releaseTrigger();
     // registered per session in startGame, so they have to come back off or

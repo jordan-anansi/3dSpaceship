@@ -21,6 +21,74 @@ let master = null;
 let noiseBuffer = null;
 let muted = false;
 
+const audioBuffers = {};
+let engineSource = null;
+let engineGain = null;
+let engineWanted = false;
+const ENGINE_VOLUME = 0.28;
+
+async function loadSample(name, url) {
+  if (!ctx) return;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const arrayBuffer = await res.arrayBuffer();
+    audioBuffers[name] = await ctx.decodeAudioData(arrayBuffer);
+    if (name === 'engine' && engineWanted && !engineSource && !muted) {
+      startEngineLoop();
+    }
+  } catch (err) {
+    console.warn(`Could not load audio sample "${name}" from ${url}:`, err);
+  }
+}
+
+export function startEngineLoop() {
+  engineWanted = true;
+  if (!ctx || muted) return;
+  if (engineSource) return; // already active
+  if (!audioBuffers['engine']) return; // will trigger on decode completion
+
+  try {
+    engineSource = ctx.createBufferSource();
+    engineSource.buffer = audioBuffers['engine'];
+    engineSource.loop = true;
+    engineGain = ctx.createGain();
+    engineGain.gain.setValueAtTime(0.0001, ctx.currentTime);
+    engineGain.gain.linearRampToValueAtTime(ENGINE_VOLUME, ctx.currentTime + 0.3);
+    engineSource.connect(engineGain).connect(master);
+    engineSource.start(0);
+  } catch (err) {
+    console.warn('Error starting engine loop:', err);
+  }
+}
+
+export function stopEngineLoop() {
+  engineWanted = false;
+  if (!engineSource) return;
+  const src = engineSource;
+  const gain = engineGain;
+  engineSource = null;
+  engineGain = null;
+  try {
+    if (ctx && gain) {
+      gain.gain.setValueAtTime(gain.gain.value, ctx.currentTime);
+      gain.gain.linearRampToValueAtTime(0.0001, ctx.currentTime + 0.3);
+      setTimeout(() => {
+        try {
+          src.stop();
+          src.disconnect();
+          gain.disconnect();
+        } catch (e) {}
+      }, 350);
+    } else {
+      src.stop();
+      src.disconnect();
+    }
+  } catch (err) {
+    console.warn('Error stopping engine loop:', err);
+  }
+}
+
 /** Roughly how far away a sound is still worth hearing at all. */
 const MAX_AUDIBLE = 420;
 /** Distance at which a sound is already down to half volume. */
@@ -47,11 +115,18 @@ export function initAudio() {
   noiseBuffer = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
   const data = noiseBuffer.getChannelData(0);
   for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+
+  // Pre-load external audio clips
+  loadSample('rail', '/audio/railgun.wav');
+  loadSample('engine', '/audio/engineLoop.wav');
 }
 
 export function toggleMute() {
   muted = !muted;
   if (master) master.gain.value = muted ? 0 : 0.55;
+  if (!muted && engineWanted && !engineSource) {
+    startEngineLoop();
+  }
   return muted;
 }
 
@@ -102,6 +177,23 @@ const SOUNDS = {
   // Hitscan. A hard crack with a pitch collapse under it — the drop is what
   // makes it read as discharge rather than as a beep.
   rail(now, atten) {
+    if (audioBuffers['rail']) {
+      const src = ctx.createBufferSource();
+      src.buffer = audioBuffers['rail'];
+      const v = voice(0.75, atten);
+      src.connect(v.gain);
+      v.gain.gain.setValueAtTime(v.level, now);
+      src.start(now);
+      src.onended = () => {
+        try {
+          src.disconnect();
+          v.gain.disconnect();
+          v.filter.disconnect();
+        } catch (e) {}
+      };
+      return;
+    }
+
     const v = voice(0.5, atten);
     const osc = ctx.createOscillator();
     osc.type = 'sawtooth';
