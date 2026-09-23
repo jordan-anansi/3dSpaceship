@@ -88,6 +88,40 @@
       box-shadow: 0 0 10px var(--go) !important;
     }
 
+    /* Bolt lead pips: where a bolt fired now meets each ship, drawn at the
+       bolt's own hit radius so the circle is the real margin for error. Green
+       rather than red on purpose — it pairs with the green reticle, and the
+       whole instruction the HUD is giving is "put the crosshair in the ring".
+       Dashed so it never reads as another hit circle at a glance. */
+    #lead-pips {
+      position: absolute; inset: 0; pointer-events: none; overflow: hidden;
+      mix-blend-mode: screen;
+      mix-blend-mode: plus-lighter;
+    }
+    .lead-pip {
+      position: absolute; top: 0; left: 0; /* moved with transform, not offsets */
+      box-sizing: border-box;
+      border-radius: 50%;
+      border: 1.5px dashed var(--go);
+      box-shadow: 0 0 6px rgba(0, 255, 102, 0.5);
+      will-change: transform, width, height;
+    }
+    /* Past a couple hundred units the ring floors out at a few pixels, and a
+       dashed circle that small is a smudge; the dot is what stays findable. */
+    .lead-pip::after {
+      content: ''; position: absolute; left: 50%; top: 50%;
+      width: 3px; height: 3px; margin: -1.5px 0 0 -1.5px;
+      border-radius: 50%; background: var(--go);
+    }
+    /* Leader line from the ship's circle out to its pip. Dim: it's there to
+       say which pip is whose, not to be looked at. */
+    .lead-line {
+      position: absolute; top: 0; left: 0; height: 1px;
+      transform-origin: 0 0;
+      background: rgba(0, 255, 102, 0.3);
+      will-change: transform, width;
+    }
+
     /* Nametags: who each box belongs to, in screen space over the canvas for
        the same reasons the boxes are (see above). Kept to the same red as the
        box so a target reads as one object rather than two overlays. */
@@ -359,6 +393,7 @@
         <div id="reticle"></div>
         <div id="hitmarker" aria-hidden="true"></div>
         <div id="target-boxes" aria-hidden="true"></div>
+        <div id="lead-pips" aria-hidden="true"></div>
         <div id="nametags" aria-hidden="true"></div>
         <div id="edge-arrows" aria-hidden="true"></div>
         <svg id="juice" viewBox="0 0 132 132" aria-hidden="true"></svg>

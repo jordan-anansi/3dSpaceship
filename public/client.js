@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import {
-  SHOT_FX, createBlast, disposeBlast, disposeFx, updateBlast,
+  BOLT_SPEED, SHOT_FX, createBlast, disposeBlast, disposeFx, updateBlast,
 } from './weapon-fx.js';
 import { initAudio, play as playSound, toggleMute } from './audio.js';
 import {
@@ -1037,6 +1037,7 @@ const ui = {
   hint: document.getElementById('controls-hint'),
   hud: document.getElementById('hud'),
   targetBoxes: document.getElementById('target-boxes'),
+  leadPips: document.getElementById('lead-pips'),
   nametags: document.getElementById('nametags'),
   edgeArrows: document.getElementById('edge-arrows'),
   hitmarker: document.getElementById('hitmarker'),
@@ -1555,6 +1556,81 @@ function placeNametag(el, p) {
     `translate(${p.x}px, ${p.y - p.half - NAMETAG_GAP}px) translate(-50%, -100%)`;
 }
 
+// --- bolt lead pip ---------------------------------------------------------
+// A second marker per opponent, drawn only while the bolt cannon is up: where
+// a bolt fired RIGHT NOW meets that ship, assuming its velocity holds. The
+// bolt is the only gun that needs one — the railgun is hitscan, the flak is an
+// area fuse you dial by hand, and the ram is contact.
+//
+// The pip is a PROMISE ("put the reticle in this circle and the shot lands"),
+// so it is solved against the same three numbers the server flies the bolt
+// with. A bolt inherits none of the shooter's velocity (spawnShot in
+// LobbyRoom gives it a bare origin and direction), which is why only the
+// target's motion and the gap between the two ships enter the equation — our
+// own speed changes where we'll BE, not where the bolt goes.
+
+// BOLT_LIFE_TICKS × TICK_DT from src/game/weapons/bolt.ts, i.e. 400 units of
+// range. Beyond it the server despawns the bolt in flight, so a pip out there
+// would be marking a hit that can never be resolved — it's hidden instead.
+const BOLT_LIFE_SEC = 2.5;
+// BOLT_HIT_RADIUS from the same file: SHIP_RADIUS padded by the bolt's own
+// body. Deliberately not SHIP_BOUND_RADIUS — this circle is the bolt's true
+// margin for error, which is the thing worth drawing at the point you aim.
+const BOLT_HIT_RADIUS = SHIP_BOUND_RADIUS + 0.4;
+
+const _rel = new THREE.Vector3();
+const _vel = new THREE.Vector3();
+const _lead = new THREE.Vector3();
+
+/**
+ * Time until a projectile of `speed` launched from our eye meets a target
+ * currently at offset `rel` and drifting at `vel`. -1 when no such time exists.
+ *
+ * |rel + vel·t| = speed·t, squared, is the quadratic
+ * (v² - speed²)t² + 2(rel·vel)t + rel² = 0.
+ *
+ * Solved exactly rather than with the single iterate the bots use (aim() in
+ * src/game/bots.ts): a bot's residual error disappears under its aim jitter,
+ * but this pip IS the aim, and one pass leaves a crossing target several ship
+ * widths off by a few hundred units.
+ */
+function interceptTime(rel, vel, speed) {
+  const a = vel.lengthSq() - speed * speed;
+  const b = 2 * rel.dot(vel);
+  const c = rel.lengthSq();
+  // A target moving at exactly bolt speed collapses the quadratic to a line,
+  // and it only has a root at all while the gap is still closing.
+  if (Math.abs(a) < 1e-6) return b < 0 ? -c / b : -1;
+  const disc = b * b - 4 * a * c;
+  if (disc < 0) return -1; // outrunning the bolt: no firing solution at any angle
+  const root = Math.sqrt(disc);
+  const t0 = (-b - root) / (2 * a);
+  const t1 = (-b + root) / (2 * a);
+  const near = Math.min(t0, t1);
+  const far = Math.max(t0, t1);
+  // the soonest intercept, since the bolt stops at the first ship it touches
+  return near > 0 ? near : (far > 0 ? far : -1);
+}
+
+/**
+ * Place the pip, plus the leader line running to it from the ship's own
+ * circle at (fromX, fromY). The line isn't decoration: with two enemies in
+ * frame a loose pip sitting between them belongs to neither, and leading the
+ * wrong ship is worse than not leading at all. It's skipped when the ship
+ * itself is off-screen, because then (fromX, fromY) isn't a real position.
+ */
+function placeLeadPip(overlay, p, fromX, fromY, withLine) {
+  overlay.pip.style.width = `${p.half * 2}px`;
+  overlay.pip.style.height = `${p.half * 2}px`;
+  overlay.pip.style.transform = `translate(${p.x - p.half}px, ${p.y - p.half}px)`;
+  if (!withLine) return;
+  const dx = p.x - fromX;
+  const dy = p.y - fromY;
+  overlay.line.style.width = `${Math.hypot(dx, dy)}px`;
+  overlay.line.style.transform =
+    `translate(${fromX}px, ${fromY}px) rotate(${Math.atan2(dy, dx)}rad)`;
+}
+
 /**
  * Pin an arrow to the edge of the frame, pointing at something you can't see.
  *
@@ -1706,9 +1782,10 @@ async function startGame(room) {
   const meshes = new Map(); // sessionId -> Object3D (ship clone or fallback cube)
   window.__game = { scene, meshes, room }; // debug hook for headless inspection
   const listItems = new Map(); // sessionId -> <li>
-  // sessionId -> the three screen-space overlays for one opponent. They're
-  // created together and placed together (exactly one of box+tag or arrow is
-  // shown per frame), so they live in one entry rather than three maps.
+  // sessionId -> the screen-space overlays for one opponent. They're created
+  // together and placed together (exactly one of box+tag or arrow is shown per
+  // frame, with the bolt's lead pip riding on top of either), so they live in
+  // one entry rather than a map apiece.
   const overlays = new Map();
   const $ = Colyseus.getStateCallbacks(room);
 
@@ -1730,6 +1807,15 @@ async function startGame(room) {
       box.className = 'target-box hidden';
       ui.targetBoxes.appendChild(box);
 
+      // line first so the pip's ring draws over the end of it
+      const line = document.createElement('div');
+      line.className = 'lead-line hidden';
+      ui.leadPips.appendChild(line);
+
+      const pip = document.createElement('div');
+      pip.className = 'lead-pip hidden';
+      ui.leadPips.appendChild(pip);
+
       const tag = document.createElement('div');
       tag.className = 'nametag hidden';
       tag.textContent = player.name;
@@ -1745,7 +1831,7 @@ async function startGame(room) {
       arrow.append(tip, who);
       ui.edgeArrows.appendChild(arrow);
 
-      overlays.set(sessionId, { box, tag, el: arrow, tip });
+      overlays.set(sessionId, { box, tag, el: arrow, tip, pip, line });
     }
 
     const li = document.createElement('li');
@@ -1767,6 +1853,8 @@ async function startGame(room) {
       overlay.box.remove();
       overlay.tag.remove();
       overlay.el.remove();
+      overlay.pip.remove();
+      overlay.line.remove();
     }
     overlays.delete(sessionId);
     listItems.get(sessionId)?.remove();
@@ -1914,6 +2002,7 @@ async function startGame(room) {
     activeOneShots.clear();
     overlays.clear();
     ui.targetBoxes.replaceChildren();
+    ui.leadPips.replaceChildren();
     ui.nametags.replaceChildren();
     ui.edgeArrows.replaceChildren();
     ui.killfeed.replaceChildren();
@@ -2070,6 +2159,9 @@ async function startGame(room) {
       const myState = room.state.players?.get(room.sessionId);
       const boreTier = myState?.tech?.get ? (myState.tech.get('railBore') ?? 0) : 0;
       const hitRadius = SHIP_BOUND_RADIUS + WIDE_BORE_RADIUS_PER_TIER * boreTier;
+      // Lead pips are the bolt's, and only while we're in a position to pull
+      // the trigger — a dead player's camera is riding a wreck.
+      const leading = myState?.weapon === 'bolt' && myState.alive;
 
       overlays.forEach((overlay, sessionId) => {
         const mesh = meshes.get(sessionId);
@@ -2079,6 +2171,8 @@ async function startGame(room) {
           overlay.box.classList.add('hidden');
           overlay.tag.classList.add('hidden');
           overlay.el.classList.add('hidden');
+          overlay.pip.classList.add('hidden');
+          overlay.line.classList.add('hidden');
           return;
         }
 
@@ -2097,6 +2191,32 @@ async function startGame(room) {
         overlay.box.classList.toggle('hidden', !boxed);
         overlay.tag.classList.toggle('hidden', !boxed);
         overlay.el.classList.toggle('hidden', !arrowed);
+
+        // Everything below re-uses projectTarget, which overwrites the single
+        // shared result — so the ship's own screen position has to be read out
+        // of `placed` before the intercept point is projected through it.
+        const shipX = placed.x;
+        const shipY = placed.y;
+        let pipped = false;
+        if (leading) {
+          const target = room.state.players?.get(sessionId);
+          // Both sides of this come off the SAME extrapolated frame the ship
+          // is drawn at: mesh.position already carries patchAge of velocity,
+          // and camera.position is our own hull. Solving against the raw
+          // patched positions instead would make the pip twitch at the
+          // network rate while the ship under it glides.
+          _rel.copy(mesh.position).sub(camera.position);
+          _vel.set(target?.vx ?? 0, target?.vy ?? 0, target?.vz ?? 0);
+          const t = interceptTime(_rel, _vel, BOLT_SPEED);
+          if (t > 0 && t <= BOLT_LIFE_SEC) {
+            _lead.copy(mesh.position).addScaledVector(_vel, t);
+            const lead = projectTarget(_lead, camera, w, h, BOLT_HIT_RADIUS);
+            pipped = lead.onScreen;
+            if (pipped) placeLeadPip(overlay, lead, shipX, shipY, boxed);
+          }
+        }
+        overlay.pip.classList.toggle('hidden', !pipped);
+        overlay.line.classList.toggle('hidden', !pipped || !boxed);
       });
     }
 

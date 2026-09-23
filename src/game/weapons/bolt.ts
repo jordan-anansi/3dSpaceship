@@ -14,8 +14,12 @@ import type { FireContext, StepContext, WeaponDef } from './types';
 // on the shared tick timeline as origin + dir · BOLT_SPEED · age. That means
 // zero per-tick position patches and perfectly smooth motion.
 //
-// BOLT_SPEED and TICK_DT are duplicated in public/client.js — both sides must
-// place bolts identically or clients render hits the server disagrees with.
+// BOLT_SPEED and TICK_DT are duplicated in public/weapon-fx.js and
+// public/client.js — both sides must place bolts identically or clients render
+// hits the server disagrees with. The client also solves a screen-space lead
+// pip against BOLT_SPEED, BOLT_LIFE_TICKS and BOLT_HIT_RADIUS (see the "bolt
+// lead pip" section of client.js), so retuning any of the three without
+// following it there leaves the HUD marking hits this file won't award.
 // First-person: the camera sits AT the ship, so the bolt line IS the
 // reticle's centre ray — for distant targets, at least. Bolts take travel
 // time, so moving targets have to be led.

@@ -56,7 +56,10 @@ export function popFlash(scene, position, color) {
 
 // --- bolt: the starting gun ----------------------------------------------
 // Travel-time projectile. BOLT_SPEED must match src/game/weapons/bolt.ts.
-const BOLT_SPEED = 160;
+// Exported because client.js solves the lead pip's intercept against it — the
+// pip and the bolt have to agree on how fast a bolt flies or the HUD promises
+// hits the server won't resolve.
+export const BOLT_SPEED = 160;
 const boltGeometry = new THREE.BoxGeometry(0.08, 0.08, 1.4); // long axis = flight axis
 const boltMaterial = new THREE.MeshBasicMaterial({ color: 0x00ff66 });
 // OUR bolts render from a muzzle below-right of the camera, converging back
