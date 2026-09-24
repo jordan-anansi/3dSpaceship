@@ -141,7 +141,7 @@ export const JUICE_REGEN_SEC = 6.5; // seconds to recover one charge
 
 // --- combat ---
 export const BASE_HULL = 100;
-export const RESPAWN_DELAY_SEC = 3;
+export const RESPAWN_DELAY_SEC = 5;
 export const SPAWN_RADIUS = 60;    // respawn somewhere on this sphere
 export const TICK_DT = 1 / 60;     // analytic seconds-per-tick (setSimulationInterval default)
 // ring buffer of everyone's positions per tick, for lag-compensated rewind.

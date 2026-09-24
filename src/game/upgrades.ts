@@ -176,69 +176,28 @@ const pick = <T>(pool: T[]) => pool[Math.floor(Math.random() * pool.length)];
  * the roguelite draw where it belongs: on the UNLOCKS, which are the
  * decisions that change what your ship can do rather than how well.
  *
- * Costs come straight from costOf(), so tiering something up mid-shop
- * immediately reprices the next tier — that rising cost is what stops a
- * scrap-rich player from simply buying the whole column.
+/**
+ * Rebuild the standing menu of available upgrades & technologies.
+ * Every catalog entry whose prerequisite is met and which isn't maxed out yet.
+ * As tech (like Juice Capacitor or weapons) is bought, dependent upgrades unlock immediately.
  */
 export function refreshUpgrades(player: Player) {
-  const entries = CATALOG.filter((entry) => entry.kind === 'upgrade' && available(player, entry));
+  const entries = CATALOG.filter((entry) => available(player, entry));
   player.upgrades = new ArraySchema<Card>(...entries.map((entry) => makeCard(player, entry)));
 }
 
-// Deal this player's dealt cards: new TECHNOLOGY only, up to two of them.
-//
-// Tier-ups used to share this deal, one of each. They don't any more — every
-// available tier-up is permanently on offer in refreshUpgrades() above, so
-// dealing one here as well would be showing the same purchase twice and
-// implying the dealt copy was somehow special. What's left is the genuine
-// draw: which new capabilities the run is offering you this round.
-//
-// A late run that has unlocked everything falls back to upgrade cards rather
-// than showing an empty deal.
-//
-// Unaffordable cards are still dealt on purpose: banking toward a big unlock
-// is a legitimate play, and hiding the expensive option would remove that
-// decision.
+// Legacy drawOffer kept for backward compatibility if needed, but unused in continuous mode.
 export function drawOffer(player: Player) {
-  const pools = { tech: [] as CatalogEntry[], upgrade: [] as CatalogEntry[] };
-  for (const entry of CATALOG) {
-    if (available(player, entry)) pools[entry.kind].push(entry);
-  }
-
-  const chosen: CatalogEntry[] = [];
-  // draw a DIFFERENT entry from `pool`, or do nothing if it's dry
-  const takeFrom = (pool: CatalogEntry[]) => {
-    const rest = pool.filter((e) => !chosen.includes(e));
-    if (rest.length) chosen.push(pick(rest));
-  };
-  while (chosen.length < 2) {
-    const before = chosen.length;
-    takeFrom(pools.tech);
-    if (chosen.length === before) takeFrom(pools.upgrade);
-    if (chosen.length === before) break; // both pools dry
-  }
-
-  player.offer = new ArraySchema<Card>(...chosen.map((entry) => makeCard(player, entry)));
   refreshUpgrades(player);
-  // nothing left to buy anywhere = already done
-  player.ready = chosen.length === 0 && player.upgrades.length === 0;
 }
 
 /**
- * Spend scrap on a dealt card or a tier-up. Returns why it failed, or null on
- * success. Validated entirely against replicated state — the client sends an
- * id, never a price.
- *
- * Buying no longer ends your shop. You can keep spending until the clock runs
- * out, you run out of scrap, or you press Done; a dealt card is consumed when
- * taken (it was one of two, and taking both would remove the choice), while
- * the tier-up list simply reprices and stays open.
+ * Spend scrap on an upgrade or technology.
+ * Validated entirely against replicated state.
  */
-export function buy(player: Player, cardId: string): string | null {
-  if (player.ready) return 'already locked in';
-  const dealt = player.offer.findIndex((c) => c.id === cardId);
+export function buy(player: Player, cardId: string, baseSettings?: BaseWorldSettings): string | null {
   const onMenu = player.upgrades.some((c) => c.id === cardId);
-  if (dealt === -1 && !onMenu) return 'not on offer';
+  if (!onMenu) return 'not on offer';
   const entry = byId.get(cardId);
   if (!entry) return 'unknown upgrade';
   // re-derive rather than trusting card.cost, which is only a display copy
@@ -249,18 +208,25 @@ export function buy(player: Player, cardId: string): string | null {
 
   player.scrap -= cost;
   player.tech.set(cardId, tier);
-  applyStats(player);
-  // Taking one of the two dealt cards spends the choice: the other stays, the
-  // taken one goes. Unlocking a weapon also opens ITS tier-ups, which is why
-  // the menu is rebuilt rather than left alone.
-  if (dealt !== -1) player.offer.splice(dealt, 1);
+
+  // If player just unlocked a weapon, auto-equip it
+  if (WEAPON_CARDS.some((w) => w.id === cardId && w.kind === 'tech')) {
+    player.weapon = cardId;
+  }
+
+  applyStats(player, baseSettings);
   refreshUpgrades(player);
   return null;
 }
 
-/** Done shopping — lock in and bank whatever's left. */
+/** Reset tech and upgrades on death (permadeath roguelike reset) */
+export function resetPlayerProgression(player: Player, baseSettings?: BaseWorldSettings) {
+  player.tech.clear();
+  player.weapon = defaultWeapon;
+  applyStats(player, baseSettings);
+  refreshUpgrades(player);
+}
+
 export function skip(player: Player) {
   player.ready = true;
-  player.offer.clear();
-  player.upgrades.clear();
 }

@@ -12,6 +12,8 @@ export interface ServerSettings {
   reticleCoolingColor: string;
   reticleReadyColor: string;
   explosionInheritVelocity: boolean;
+  respawnDelaySec: number;
+  passiveScrapPerSecond: number;
 }
 
 export const DEFAULT_SERVER_SETTINGS: ServerSettings = {
@@ -25,6 +27,8 @@ export const DEFAULT_SERVER_SETTINGS: ServerSettings = {
   reticleCoolingColor: '#6ec387',
   reticleReadyColor: '#00ff66',
   explosionInheritVelocity: true,
+  respawnDelaySec: 5,
+  passiveScrapPerSecond: 2,
 };
 
 const SETTINGS_FILE_PATH = path.resolve(__dirname, '../../server-settings.json');

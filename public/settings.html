@@ -426,6 +426,32 @@
           <input id="num-botCount" type="number" min="0" max="8" step="1" value="4" />
         </div>
       </div>
+
+      <!-- Respawn Delay -->
+      <div class="setting-card">
+        <div class="setting-header">
+          <span class="setting-name">⏱ Respawn Delay</span>
+          <span id="badge-respawnDelaySec" class="setting-badge">5s</span>
+        </div>
+        <p class="setting-desc">Seconds required before a downed ship respawns into combat.</p>
+        <div class="slider-row">
+          <input id="slider-respawnDelaySec" type="range" min="1" max="15" step="1" value="5" />
+          <input id="num-respawnDelaySec" type="number" min="1" max="15" step="1" value="5" />
+        </div>
+      </div>
+
+      <!-- Scrap Growth Rate -->
+      <div class="setting-card">
+        <div class="setting-header">
+          <span class="setting-name">🪙 Scrap Growth Rate</span>
+          <span id="badge-passiveScrapPerSecond" class="setting-badge">2.0/s</span>
+        </div>
+        <p class="setting-desc">Passive scrap continuously earned per second while alive in combat.</p>
+        <div class="slider-row">
+          <input id="slider-passiveScrapPerSecond" type="range" min="0" max="20" step="0.5" value="2" />
+          <input id="num-passiveScrapPerSecond" type="number" min="0" max="20" step="0.5" value="2" />
+        </div>
+      </div>
     </section>
 
     <!-- Gameplay, Audio & Visual Tuning Section -->
@@ -513,6 +539,8 @@
         dashImpulse: 38,
         baseHull: 100,
         botCount: 4,
+        respawnDelaySec: 5,
+        passiveScrapPerSecond: 2,
       },
       arcade: {
         maxSpeed: 130,
@@ -521,6 +549,8 @@
         dashImpulse: 65,
         baseHull: 120,
         botCount: 4,
+        respawnDelaySec: 4,
+        passiveScrapPerSecond: 3,
       },
       inertia: {
         maxSpeed: 100,
@@ -529,6 +559,8 @@
         dashImpulse: 45,
         baseHull: 100,
         botCount: 4,
+        respawnDelaySec: 5,
+        passiveScrapPerSecond: 2,
       },
       tactical: {
         maxSpeed: 45,
@@ -537,6 +569,8 @@
         dashImpulse: 25,
         baseHull: 200,
         botCount: 4,
+        respawnDelaySec: 6,
+        passiveScrapPerSecond: 1.5,
       }
     };
 
@@ -551,6 +585,8 @@
       { key: 'dashImpulse', fmt: (v) => `${Math.round(v)} u/s` },
       { key: 'baseHull', fmt: (v) => `${Math.round(v)} HP` },
       { key: 'botCount', fmt: (v) => `${Math.round(v)} bots` },
+      { key: 'respawnDelaySec', fmt: (v) => `${Math.round(v)}s` },
+      { key: 'passiveScrapPerSecond', fmt: (v) => `${Number(v).toFixed(1)}/s` },
     ];
 
     let room = null;

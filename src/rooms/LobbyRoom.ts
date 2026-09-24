@@ -6,7 +6,7 @@ import { tierOf } from '../game/catalog';
 import { Blast, LobbyState, Player, Shot } from '../game/schema';
 import { loadServerSettings, saveServerSettings, watchServerSettingsFile } from '../game/settings';
 import type { ServerSettings } from '../game/settings';
-import { applyStats, buy, drawOffer, skip, statsFor } from '../game/upgrades';
+import { applyStats, buy, drawOffer, refreshUpgrades, resetPlayerProgression, skip, statsFor } from '../game/upgrades';
 import { WEAPONS, defaultWeapon, weaponFor } from '../game/weapons';
 import type { Hit, StepContext, SweepOpts } from '../game/weapons';
 import {
@@ -15,7 +15,7 @@ import {
   DRAG_RAMP_HI_MULT, DRAG_RAMP_LO_MULT, HISTORY_TICKS, INTERMISSION_SECONDS, LOCAL_FORWARD,
   LOCAL_RIGHT, LOCAL_UP, MOUSE_SENS, RESPAWN_DELAY_SEC, ROUND_STIPEND_BASE, ROUND_STIPEND_PER_ROUND,
   SCRAP_PER_BOT_KILL, SCRAP_PER_DAMAGE, SCRAP_PER_PLAYER_KILL, SHIP_RADIUS, SHOP_SECONDS,
-  SPAWN_RADIUS, SPEED_RAIL, STOP_SPEED, TICK_DT, asteroidCenters,
+  SPAWN_RADIUS, SPEED_RAIL, STARTING_SCRAP, STOP_SPEED, TICK_DT, asteroidCenters,
 } from '../game/tuning';
 
 /**
@@ -133,12 +133,23 @@ export class LobbyRoom extends Room<LobbyState> {
 
   onCreate() {
     this.setState(new LobbyState());
+    this.state.phase = 'combat';
+    this.state.round = 1;
+    this.state.phaseEndTick = 0;
     // 60 Hz state replication (Colyseus default is 50ms / 20 Hz).
     // Matches server simulation rate and eliminates coarse 50ms network jumps.
     this.setPatchRate(1000 / 60);
 
     // Load initial settings from server-settings.json on disk
     this.applySettingsToState(loadServerSettings());
+
+    // Initialize active bots
+    this.bots.sync(
+      this.state.players,
+      this.state.botCount,
+      Math.max(BOT_MAX, this.state.botCount),
+      1
+    );
 
     // Watch for external edits to server-settings.json and hot-reload them
     this.stopSettingsWatcher = watchServerSettingsFile((reloaded) => {
@@ -162,6 +173,8 @@ export class LobbyRoom extends Room<LobbyState> {
         reticleCoolingColor: this.state.reticleCoolingColor,
         reticleReadyColor: this.state.reticleReadyColor,
         explosionInheritVelocity: this.state.explosionInheritVelocity,
+        respawnDelaySec: this.state.respawnDelaySec,
+        passiveScrapPerSecond: this.state.passiveScrapPerSecond,
       };
       saveServerSettings(current);
       client.send('serverSettingsPromoted', { timestamp: Date.now() });
@@ -253,27 +266,23 @@ export class LobbyRoom extends Room<LobbyState> {
 
     // --- progression ---
 
-    this.onMessage('startGame', (client) => {
-      if (this.state.phase !== 'lobby') return;
-      const who = this.state.players.get(client.sessionId)?.name ?? client.sessionId;
-      console.log(`[lobby] ${who} started the run`);
-      this.beginShop();
+    this.onMessage('enterGame', (client, msg?: { name?: string }) => {
+      this.spawnPlayer(client, msg?.name);
+    });
+
+    this.onMessage('startGame', (client, msg?: { name?: string }) => {
+      this.spawnPlayer(client, msg?.name);
     });
 
     this.onMessage('buy', (client, msg: { id?: string }) => {
-      if (this.state.phase !== 'shop') return;
       const player = this.state.players.get(client.sessionId);
       if (!player) return;
-      const err = buy(player, String(msg?.id ?? ''));
+      const err = buy(player, String(msg?.id ?? ''), this.state);
       if (err) client.send('shopError', err);
       else console.log(`[lobby] ${player.name} bought ${msg?.id}`);
     });
 
-    this.onMessage('skip', (client) => {
-      if (this.state.phase !== 'shop') return;
-      const player = this.state.players.get(client.sessionId);
-      if (player) skip(player);
-    });
+    this.onMessage('skip', (_client) => {});
 
     this.onMessage('setWeapon', (client, msg: { id?: string }) => {
       const player = this.state.players.get(client.sessionId);
@@ -345,7 +354,13 @@ export class LobbyRoom extends Room<LobbyState> {
     if (typeof settings.explosionInheritVelocity === 'boolean') {
       this.state.explosionInheritVelocity = settings.explosionInheritVelocity;
     }
-    console.log(`[lobby] active serverSettings: maxSpeed=${this.state.maxSpeed}, thrustAccel=${this.state.thrustAccel}, drag=${this.state.drag}, dashImpulse=${this.state.dashImpulse}, baseHull=${this.state.baseHull}, botCount=${this.state.botCount}, enemyFireSounds=${this.state.enemyFireSounds}, reticleCooling=${this.state.reticleCoolingColor}, reticleReady=${this.state.reticleReadyColor}, expInheritVel=${this.state.explosionInheritVelocity}`);
+    if (typeof settings.respawnDelaySec === 'number' && Number.isFinite(settings.respawnDelaySec)) {
+      this.state.respawnDelaySec = Math.max(1, Math.min(30, Math.round(settings.respawnDelaySec)));
+    }
+    if (typeof settings.passiveScrapPerSecond === 'number' && Number.isFinite(settings.passiveScrapPerSecond)) {
+      this.state.passiveScrapPerSecond = Math.max(0, Math.min(100, settings.passiveScrapPerSecond));
+    }
+    console.log(`[lobby] active serverSettings: maxSpeed=${this.state.maxSpeed}, thrustAccel=${this.state.thrustAccel}, drag=${this.state.drag}, dashImpulse=${this.state.dashImpulse}, baseHull=${this.state.baseHull}, botCount=${this.state.botCount}, enemyFireSounds=${this.state.enemyFireSounds}, reticleCooling=${this.state.reticleCoolingColor}, reticleReady=${this.state.reticleReadyColor}, expInheritVel=${this.state.explosionInheritVelocity}, respawnDelay=${this.state.respawnDelaySec}s, passiveScrap=${this.state.passiveScrapPerSecond}/s`);
   }
 
   // ---------------------------------------------------------------- phases
@@ -358,84 +373,8 @@ export class LobbyRoom extends Room<LobbyState> {
     return out;
   }
 
-  private beginShop() {
-    this.state.round += 1;
-    this.state.phase = 'shop';
-    this.state.phaseEndTick = this.state.tick + this.secondsToTicks(SHOP_SECONDS);
-    this.clearOrdnance();
-    for (const player of this.humans()) {
-      player.ready = false;
-      drawOffer(player);
-    }
-    console.log(`[lobby] round ${this.state.round}: shop open`);
-  }
-
-  private beginCombat() {
-    this.state.phase = 'combat';
-    this.state.phaseEndTick = this.state.tick + this.secondsToTicks(COMBAT_SECONDS);
-    this.clearOrdnance();
-    // Bots are synced at the START of combat so their loadout matches the
-    // round being fought, and so a player who joined during the shop is
-    // already counted when we decide how many to field.
-    this.bots.sync(this.state.players, this.state.botCount, Math.max(BOT_MAX, this.state.botCount), this.state.round);
-    this.state.players.forEach((p, id) => {
-      p.ready = false;
-      p.offer.clear();
-      p.upgrades.clear();
-      p.kills = 0;
-      p.deaths = 0;
-      p.roundScrap = 0;
-      p.damageDealt = 0;
-      p.shotsFired = 0;
-      p.shotsHit = 0;
-      p.ramReadyTick = 0;
-      this.respawn(p, id);
-    });
-    console.log(`[lobby] round ${this.state.round}: fight`);
-  }
-
-  private beginIntermission() {
-    this.state.phase = 'intermission';
-    this.state.phaseEndTick = this.state.tick + this.secondsToTicks(INTERMISSION_SECONDS);
-    this.clearOrdnance();
-    // Everyone who saw the round through gets paid, win or lose. The stipend
-    // is what guarantees the next shop is never a dead screen — combat
-    // earnings alone can be zero for a player who had a bad round, and a
-    // shop with nothing affordable in it is just a 30-second pause.
-    const stipend = ROUND_STIPEND_BASE + ROUND_STIPEND_PER_ROUND * this.state.round;
-    for (const player of this.humans()) {
-      player.scrap += stipend;
-      player.roundScrap += stipend;
-    }
-    console.log(`[lobby] round ${this.state.round} over — stipend ${stipend}`);
-  }
-
   private stepPhase() {
-    const { phase, tick, phaseEndTick } = this.state;
-    if (phase === 'lobby') return;
-
-    const expired = phaseEndTick > 0 && tick >= phaseEndTick;
-
-    if (phase === 'shop') {
-      const humans = this.humans();
-      // end early once everyone has decided — no reason to sit out the clock.
-      // An empty room (everyone disconnected mid-shop) falls through to the
-      // timer rather than starting a fight nobody is in.
-      const allReady = humans.length > 0 && humans.every((p) => p.ready);
-      if (allReady || expired) this.beginCombat();
-      return;
-    }
-
-    if (phase === 'combat' && expired) { this.beginIntermission(); return; }
-    if (phase === 'intermission' && expired) this.beginShop();
-  }
-
-  /** Drop every in-flight shot and blast — used on every phase boundary. */
-  private clearOrdnance() {
-    this.state.shots.clear();
-    this.state.blasts.clear();
-    // the tokens only ever refer to shots that no longer exist now
-    this.lastHitToken.clear();
+    // Endless continuous combat mode: runs indefinitely without rounds
   }
 
   // ------------------------------------------------------------ simulation
@@ -451,6 +390,13 @@ export class LobbyRoom extends Room<LobbyState> {
       // desyncs the simulation from the player's loadout when it doesn't.
       const stats = statsFor(p, this.state);
       const input = this.stepIntent(p, sessionId, dt);
+
+      // Passive scrap generation while alive
+      if (p.alive && this.state.passiveScrapPerSecond > 0) {
+        const passive = this.state.passiveScrapPerSecond * dt;
+        p.scrap += passive;
+        p.roundScrap += passive;
+      }
 
       // Friction first, then accelerate — Source's order. Doing it this way
       // round means the projection cap gets the last word, so straight-line
@@ -637,7 +583,14 @@ export class LobbyRoom extends Room<LobbyState> {
     victim.hull = 0;
     victim.alive = false;
     victim.deaths += 1;
-    victim.respawnTick = this.state.tick + this.secondsToTicks(RESPAWN_DELAY_SEC);
+    const respawnDelay = this.state.respawnDelaySec ?? RESPAWN_DELAY_SEC;
+    victim.respawnTick = this.state.tick + this.secondsToTicks(respawnDelay);
+
+    // Victim unspent scrap is stolen by killer as bounty, then lost on death.
+    // Upgrades and tech are KEPT across death!
+    const unspentScrap = Math.max(0, Math.floor(victim.scrap));
+    victim.scrap = 0;
+
     // The wreck keeps drifting server-side but stops being drawn, so without
     // something at the moment of death a ship just blinks out. Cosmetic only.
     // Velocity is passed so particles start with the downed ship's momentum.
@@ -647,13 +600,13 @@ export class LobbyRoom extends Room<LobbyState> {
       'death',
       new Vector3(victim.vx, victim.vy, victim.vz)
     );
+    let totalBounty = 0;
     if (shooter) {
       shooter.kills += 1;
-      if (!shooter.isBot) {
-        const bounty = victim.isBot ? SCRAP_PER_BOT_KILL : SCRAP_PER_PLAYER_KILL;
-        shooter.scrap += bounty;
-        shooter.roundScrap += bounty;
-      }
+      const baseBounty = victim.isBot ? SCRAP_PER_BOT_KILL : SCRAP_PER_PLAYER_KILL;
+      totalBounty = baseBounty + unspentScrap;
+      shooter.scrap += totalBounty;
+      shooter.roundScrap += totalBounty;
     }
     // Broadcast rather than sent to the two parties: the feed is for everyone,
     // and knowing who is beating whom is how you decide where to fly next.
@@ -668,8 +621,9 @@ export class LobbyRoom extends Room<LobbyState> {
       victimId,
       victimBot: victim.isBot,
       weapon: source ? weaponFor(source.weapon).name : '',
+      bounty: totalBounty,
     });
-    console.log(`[lobby] ${shooter?.name ?? '?'} destroyed ${victim.name}`);
+    console.log(`[lobby] ${shooter?.name ?? '?'} destroyed ${victim.name} (bounty: ${totalBounty} scrap, unspent looted: ${unspentScrap})`);
   }
 
   /** Full hull, zeroed velocity, fresh position on the spawn sphere. */
@@ -692,6 +646,7 @@ export class LobbyRoom extends Room<LobbyState> {
     // NEW orientation and drag the camera off. Dropping the queue lets the
     // client's reconcile step snap to this quaternion instead.
     this.pendingLook.delete(sessionId);
+    refreshUpgrades(p);
   }
 
   // ------------------------------------------------------------- weapons
@@ -994,20 +949,13 @@ export class LobbyRoom extends Room<LobbyState> {
 
   // ------------------------------------------------------------ membership
 
-  onJoin(client: Client, options: { name?: string; isSettings?: boolean }) {
-    if (options?.isSettings) {
-      this.clientsById.set(client.sessionId, client);
-      console.log(`[lobby] settings observer joined (${client.sessionId})`);
-      return;
-    }
+  private spawnPlayer(client: Client, name?: string) {
+    if (this.state.players.has(client.sessionId)) return;
 
     const player = new Player();
-    player.name = (options.name || 'anonymous').slice(0, 24);
-    // No tech entry for the starting gun. Ownership of `defaultWeapon` is a
-    // special case everywhere it's checked (setWeapon, fire, the HUD strip),
-    // so granting it a tier would be a second source of truth — and there is
-    // no catalog card that could ever legitimately set one.
+    player.name = (name || 'anonymous').slice(0, 24);
     applyStats(player, this.state);
+    refreshUpgrades(player);
     const at = randomSpawn();
     player.x = at.x; player.y = at.y; player.z = at.z;
     const q = new Quaternion().setFromUnitVectors(LOCAL_FORWARD, at.clone().negate().normalize());
@@ -1015,16 +963,36 @@ export class LobbyRoom extends Room<LobbyState> {
 
     this.state.players.set(client.sessionId, player);
     this.clientsById.set(client.sessionId, client);
-    // Joining mid-shop gets you cards for the round you're about to fight;
-    // joining mid-combat drops you straight in, and you shop at the break.
-    if (this.state.phase === 'shop') drawOffer(player);
-    console.log(`[lobby] ${player.name} joined (${client.sessionId})`);
+    console.log(`[lobby] ${player.name} joined as active combatant (${client.sessionId})`);
+
+    this.bots.sync(
+      this.state.players,
+      this.state.botCount,
+      Math.max(BOT_MAX, this.state.botCount),
+      1
+    );
+  }
+
+  onJoin(client: Client, options: { name?: string; isSettings?: boolean; isPreview?: boolean }) {
+    if (options?.isSettings) {
+      this.clientsById.set(client.sessionId, client);
+      console.log(`[lobby] settings observer joined (${client.sessionId})`);
+      return;
+    }
+
+    if (options?.isPreview) {
+      this.clientsById.set(client.sessionId, client);
+      console.log(`[lobby] preview observer joined (${client.sessionId})`);
+      return;
+    }
+
+    this.spawnPlayer(client, options?.name);
   }
 
   onLeave(client: Client) {
     if (!this.state.players.has(client.sessionId)) {
       this.clientsById.delete(client.sessionId);
-      console.log(`[lobby] settings observer left (${client.sessionId})`);
+      console.log(`[lobby] observer left (${client.sessionId})`);
       return;
     }
 
@@ -1039,16 +1007,13 @@ export class LobbyRoom extends Room<LobbyState> {
     this.lastHitToken.delete(client.sessionId);
     this.bots.forget(client.sessionId);
 
-    // A run with nobody left in it goes back to the start rather than
-    // grinding through rounds of bots for an empty room.
-    if (this.humans().length === 0 && this.state.phase !== 'lobby') {
-      this.state.phase = 'lobby';
-      this.state.round = 0;
-      this.state.phaseEndTick = 0;
-      this.clearOrdnance();
-      this.bots.sync(this.state.players, 0, 0, 0);
-      console.log('[lobby] room empty — run reset');
-    }
+    // Sync bots to maintain target combatant count
+    this.bots.sync(
+      this.state.players,
+      this.state.botCount,
+      Math.max(BOT_MAX, this.state.botCount),
+      1
+    );
   }
 
   onDispose() {

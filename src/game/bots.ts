@@ -110,6 +110,7 @@ export class Bots {
     const bot = new Player();
     bot.isBot = true;
     bot.name = `DRN-${String(++botSerial).padStart(2, '0')}`;
+    bot.scrap = 0;
     const at = randomSpawn();
     bot.x = at.x; bot.y = at.y; bot.z = at.z;
     // face roughly inward, where the action is

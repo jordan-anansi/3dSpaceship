@@ -1,5 +1,5 @@
 import { Schema, MapSchema, ArraySchema, type } from '@colyseus/schema';
-import { BASE_HULL, BOT_TARGET_COMBATANTS, DASH_IMPULSE, MAX_WISH, STARTING_SCRAP, THRUST_ACCEL } from './tuning';
+import { BASE_HULL, BOT_TARGET_COMBATANTS, DASH_IMPULSE, MAX_WISH, RESPAWN_DELAY_SEC, STARTING_SCRAP, THRUST_ACCEL } from './tuning';
 
 // One offered upgrade card. Name and blurb are replicated rather than looked
 // up client-side: the catalog lives in upgrades.ts (server TS), and shipping
@@ -178,14 +178,16 @@ export class LobbyState extends Schema {
   @type('string') reticleCoolingColor: string = '#6ec387';
   @type('string') reticleReadyColor: string = '#00ff66';
   @type('boolean') explosionInheritVelocity: boolean = true;
+  @type('number') respawnDelaySec: number = RESPAWN_DELAY_SEC;
+  @type('number') passiveScrapPerSecond: number = 2;
 
   // --- round structure ---
   // 'lobby'        — free flight, waiting for someone to press Start
   // 'shop'         — everyone picks one of two cards
   // 'combat'       — the round proper: PvP + bots, respawns on
   // 'intermission' — scoreboard, stipend paid, then back to shop
-  @type('string') phase: string = 'lobby';
-  @type('number') round: number = 0;
+  @type('string') phase: string = 'combat';
+  @type('number') round: number = 1;
   // tick the current phase ends on (0 = phase has no timer, i.e. lobby)
   @type('number') phaseEndTick: number = 0;
   // target number of combatants topped up by bots (replicated so clients stay in sync)

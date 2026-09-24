@@ -62,6 +62,72 @@ const RAM_COOLDOWN_SEC = 5;
 // Null between sessions; startGame owns the lifetime.
 let activeGrid = null;
 
+let previewRoom = null;
+let tabCursorUnlocked = false;
+
+function updateLobbyRoster(players) {
+  const rosterList = document.getElementById('lobby-roster-list');
+  if (!rosterList) return;
+  rosterList.replaceChildren();
+
+  if (!players || players.size === 0) {
+    const empty = document.createElement('li');
+    empty.className = 'empty-roster';
+    empty.textContent = 'Scanning sector... No active pilots detected.';
+    rosterList.appendChild(empty);
+    return;
+  }
+
+  const humans = [];
+  let botCount = 0;
+  players.forEach((p) => {
+    if (p.isBot) botCount++;
+    else humans.push(p);
+  });
+
+  humans.forEach((p) => {
+    const li = document.createElement('li');
+    li.className = 'lobby-pilot-chip player';
+    const nameSpan = document.createElement('span');
+    nameSpan.textContent = `🚀 ${p.name}`;
+    const scoreSpan = document.createElement('span');
+    scoreSpan.className = 'roster-score';
+    scoreSpan.textContent = `${p.kills} kill${p.kills === 1 ? '' : 's'}`;
+    li.append(nameSpan, scoreSpan);
+    rosterList.appendChild(li);
+  });
+
+  if (botCount > 0) {
+    const li = document.createElement('li');
+    li.className = 'lobby-pilot-chip bot';
+    const textSpan = document.createElement('span');
+    textSpan.textContent = `🤖 ${botCount} AI Combat Drone${botCount > 1 ? 's' : ''}`;
+    li.appendChild(textSpan);
+    rosterList.appendChild(li);
+  }
+
+  if (humans.length === 0 && botCount === 0) {
+    const empty = document.createElement('li');
+    empty.className = 'empty-roster';
+    empty.textContent = 'Sector clear. Be the first to launch!';
+    rosterList.appendChild(empty);
+  }
+}
+
+async function initLobbyPreview() {
+  try {
+    previewRoom = await client.joinOrCreate('lobby', { isPreview: true });
+    const $ = Colyseus.getStateCallbacks(previewRoom);
+    const update = () => updateLobbyRoster(previewRoom.state?.players);
+    $(previewRoom.state).players.onAdd(update);
+    $(previewRoom.state).players.onRemove(update);
+    previewRoom.onStateChange.once(update);
+  } catch (err) {
+    console.warn('Lobby preview connection failed:', err);
+  }
+}
+initLobbyPreview();
+
 function toggleFullscreen() {
   const wrap = document.getElementById('game-wrap');
   if (!wrap) return;
@@ -79,17 +145,36 @@ form.addEventListener('submit', async (event) => {
   const name = nameInput.value.trim();
   if (!name) return;
 
-  status.textContent = 'connecting...';
+  status.textContent = 'launching into arena...';
   // A submit IS the user gesture an AudioContext needs, and it's the last one
   // guaranteed to happen before the shooting starts — after this the pointer
   // is locked and there may never be another ordinary click.
   initAudio();
+
+  // Instant fullscreen request directly on user gesture
+  const wrap = document.getElementById('game-wrap');
+  if (wrap && !document.fullscreenElement) {
+    wrap.requestFullscreen().catch((err) => console.warn('fullscreen request failed:', err));
+  }
+
   try {
-    const room = await client.joinOrCreate('lobby', { name });
-    form.classList.add('hidden');
+    let room = previewRoom;
+    if (!room || room.connection?.isOpen === false) {
+      room = await client.joinOrCreate('lobby', { name });
+    } else {
+      room.send('enterGame', { name });
+    }
+
+    const joinSection = document.getElementById('join-section') || form;
+    joinSection.classList.add('hidden');
     lobbyDiv.classList.remove('hidden');
-    status.textContent = `connected as ${name} (session ${room.sessionId})`;
+    status.textContent = `active pilot: ${name}`;
     await startGame(room);
+
+    // Lock pointer to canvas and start engine sound
+    const gameCanvas = document.getElementById('game');
+    gameCanvas?.requestPointerLock();
+    startEngineLoop();
   } catch (err) {
     status.textContent = `failed to join: ${err.message}`;
   }
@@ -189,10 +274,27 @@ document.addEventListener('pointerlockchange', () => {
   document.body.classList.toggle('pointer-locked', locked);
   if (!locked) releaseTrigger();
 });
-window.addEventListener('blur', () => { releaseTrigger(); held.clear(); sendInput(); });
+window.addEventListener('blur', () => {
+  releaseTrigger();
+  held.clear();
+  sendInput();
+  if (tabCursorUnlocked) {
+    tabCursorUnlocked = false;
+    document.body.classList.remove('tab-free-cursor');
+  }
+});
 
 window.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return; // typing in a form, not flying
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    if (!tabCursorUnlocked) {
+      tabCursorUnlocked = true;
+      document.body.classList.add('tab-free-cursor');
+      if (document.pointerLockElement) document.exitPointerLock();
+    }
+    return;
+  }
   if (e.key === ' ') {
     e.preventDefault(); // don't scroll the page or "click" a focused button
     if (!e.repeat) pullTrigger('key');
@@ -243,6 +345,18 @@ window.addEventListener('keydown', (e) => {
   if (TRACKED.has(key) && !held.has(key)) { held.add(key); sendInput(); }
 });
 window.addEventListener('keyup', (e) => {
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    if (tabCursorUnlocked) {
+      tabCursorUnlocked = false;
+      document.body.classList.remove('tab-free-cursor');
+      if (currentRoom) {
+        const gameCanvas = document.getElementById('game');
+        gameCanvas?.requestPointerLock();
+      }
+    }
+    return;
+  }
   if (e.key === ' ') { releaseTrigger('key'); return; }
   const key = e.key.toLowerCase();
   if (TRACKED.has(key)) { held.delete(key); sendInput(); }
@@ -328,6 +442,7 @@ gameCanvas.addEventListener('mousedown', (e) => {
   }
   if (e.button !== 0) return;
   if (!currentRoom) return;
+  if (tabCursorUnlocked) return;
   const phase = currentRoom.state?.phase;
   // During shop or intermission the overlay needs real clicks, so there's nothing to grab
   if (phase === 'shop' || phase === 'intermission') return;
@@ -1100,6 +1215,9 @@ const ui = {
   openExpLabBtn: document.getElementById('open-exp-lab-btn'),
   openAttribBtn: document.getElementById('open-attrib-btn'),
   joinAttribBtn: document.getElementById('join-attrib-btn'),
+  lowerLeftHud: document.getElementById('lower-left-hud'),
+  hudUpgrades: document.getElementById('hud-upgrades'),
+  upgradesList: document.getElementById('upgrades-list'),
   overlaySettingsBtn: document.getElementById('overlay-settings-btn'),
   overlayLabBtn: document.getElementById('overlay-lab-btn'),
   overlayAttribBtn: document.getElementById('overlay-attrib-btn'),
@@ -1162,6 +1280,17 @@ function pushKillfeed(event, myId) {
   victim.textContent = event.victim;
 
   row.append(by, weapon, victim);
+
+  if (event.bounty && event.bounty > 0) {
+    const bountySpan = document.createElement('span');
+    bountySpan.className = 'bounty';
+    bountySpan.style.color = '#ffaa33';
+    bountySpan.style.marginLeft = '0.45rem';
+    bountySpan.style.fontWeight = 'bold';
+    bountySpan.textContent = `(+${event.bounty} scrap)`;
+    row.append(bountySpan);
+  }
+
   ui.killfeed.prepend(row);
   while (ui.killfeed.children.length > KILLFEED_MAX) ui.killfeed.lastChild.remove();
 
@@ -1399,95 +1528,88 @@ function renderHint(me) {
   // only worth showing once there's more than the starting railgun to switch to
   const extraGuns = WEAPON_ORDER.filter((w) => w.id !== 'rail' && (me.tech.get(w.id) ?? 0) > 0);
   if (extraGuns.length) parts.push(`1-${WEAPON_ORDER.length}: weapon`);
-  parts.push('o: server settings', 'x: explosion lab', 'f: fullscreen', 'g: grid', 'm: mute', 'b: bots', 'esc: release mouse');
+  parts.push('tab: hold for upgrade cursor', 'o: server settings', 'x: explosion lab', 'f: fullscreen', 'g: grid', 'm: mute', 'b: bots', 'esc: release mouse');
   const text = parts.join('   ');
   if (ui.hint.textContent !== text) ui.hint.textContent = text;
 }
 
+let lastUpgradesSignature = '';
+function renderHudUpgrades(me) {
+  if (!ui.upgradesList) return;
+  const signature = `${me.scrap | 0}|` +
+    (me.upgrades ? me.upgrades.map((c) => `${c.id}:${c.tier}:${c.cost}`).join(',') : '');
+  if (signature === lastUpgradesSignature) return;
+  lastUpgradesSignature = signature;
+
+  ui.upgradesList.replaceChildren();
+
+  if (!me.upgrades || me.upgrades.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-roster';
+    empty.style.fontSize = '0.7rem';
+    empty.textContent = 'All upgrades maxed!';
+    ui.upgradesList.appendChild(empty);
+    return;
+  }
+
+  me.upgrades.forEach((card) => {
+    const affordable = me.scrap >= card.cost;
+    const row = document.createElement('div');
+    row.className = `hud-up-row${affordable ? ' affordable' : ''}`;
+
+    const name = document.createElement('div');
+    name.className = 'up-name';
+    name.textContent = card.name;
+    name.title = card.blurb;
+
+    const tier = document.createElement('div');
+    tier.className = 'up-tier';
+    tier.textContent = `T${card.tier}/${card.maxTier}`;
+
+    const cost = document.createElement('div');
+    cost.className = `up-cost${affordable ? '' : ' cant'}`;
+    cost.textContent = `${card.cost} ⚙`;
+
+    const btn = document.createElement('button');
+    btn.className = 'up-btn';
+    btn.type = 'button';
+    btn.textContent = '+';
+    btn.title = `Upgrade ${card.name} (${card.cost} scrap)`;
+    btn.disabled = !affordable;
+
+    btn.addEventListener('mousedown', (e) => {
+      e.stopPropagation();
+    });
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      currentRoom?.send('buy', { id: card.id });
+      playSound('buy');
+    });
+
+    row.append(name, tier, cost, btn);
+    ui.upgradesList.appendChild(row);
+  });
+}
+
 /**
- * One pass over replicated state → DOM. Called on a ~10Hz timer rather than
- * per frame: none of this needs 60Hz, and rebuilding cards that often would
- * make them unclickable.
+ * One pass over replicated state → DOM. Called on a ~10Hz timer.
  */
-let lastAudioPhase = null;
 function syncUi(room) {
   const state = room.state;
   const me = state.players?.get(room.sessionId);
   if (!me) return;
-  const phase = state.phase;
-  const inCombat = phase === 'combat';
 
-  // Engine sound runs only when movement is allowed in the 3D world (combat phase),
-  // and stops when the round ends (intermission / shop / lobby).
-  if (phase !== lastAudioPhase) {
-    if (phase === 'combat') {
-      startEngineLoop();
-    } else {
-      stopEngineLoop();
-    }
-    lastAudioPhase = phase;
+  // Continuous combat phase: overlay and round banner remain permanently hidden
+  ui.overlay?.classList.add('hidden');
+  ui.banner?.classList.add('hidden');
+  ui.lowerLeftHud?.classList.remove('hidden');
+
+  for (const el of [ui.scrapTag, ui.weaponStrip, ui.killfeed, reticleEl]) {
+    el?.classList.remove('hidden');
   }
+  juiceSvg?.classList.toggle('hidden', me.juiceMax < 1);
 
-  // --- overlay ---
-  const showOverlay = !inCombat;
-  if (showOverlay !== overlayVisible) {
-    overlayVisible = showOverlay;
-    ui.overlay.classList.toggle('hidden', !showOverlay);
-    // an overlay that appears while the pointer is captured would be
-    // unclickable, so hand the cursor back the moment combat ends
-    if (showOverlay && document.pointerLockElement) document.exitPointerLock();
-  }
-
-  ui.lobby.classList.toggle('hidden', phase !== 'lobby');
-  ui.shop.classList.toggle('hidden', phase !== 'shop');
-  ui.scores.classList.toggle('hidden', phase !== 'intermission');
-
-  const remaining = state.phaseEndTick > 0
-    ? (state.phaseEndTick - estimatedTick()) * TICK_DT
-    : 0;
-
-
-
-  if (phase === 'lobby') {
-    ui.title.textContent = 'Ready when you are';
-    ui.sub.textContent = 'Rounds of ship-to-ship combat. Shop between each one. Fly around while you wait.';
-    ui.clock.textContent = '';
-  } else if (phase === 'shop') {
-    ui.title.textContent = `Round ${state.round} — outfitting`;
-    ui.sub.textContent = me.ready
-      ? 'Locked in. Waiting for the others.'
-      : 'Take one from the draw, tier up as much as you like, or bank it all.';
-    ui.clock.textContent = mmss(remaining);
-    ui.shopScrap.textContent = `${Math.floor(me.scrap)} scrap`;
-    ui.skipBtn.disabled = me.ready;
-    renderCards(me);
-    renderUpgradeMenu(me);
-    const humans = [...state.players.values()].filter((p) => !p.isBot);
-    const ready = humans.filter((p) => p.ready).length;
-    ui.readyLine.textContent = humans.length > 1
-      ? `${ready} of ${humans.length} ready`
-      : '';
-  } else if (phase === 'intermission') {
-    ui.title.textContent = `Round ${state.round} complete`;
-    ui.sub.textContent = 'Stipend paid. Next shop opens shortly.';
-    ui.clock.textContent = mmss(remaining);
-    renderScoreboard(state.players, room.sessionId);
-  }
-
-  // --- in-flight HUD ---
-  // Hidden outside combat rather than left underneath the overlay: at 0.92
-  // alpha it ghosts through as unreadable smudge, and every number on it
-  // (round, clock, scrap) is already on the overlay itself. The reticle and
-  // juice arc go with it — a crosshair over a shop screen is just noise.
-  for (const el of [ui.banner, ui.scrapTag, ui.hullWrap, ui.weaponStrip, ui.killfeed, reticleEl]) {
-    el.classList.toggle('hidden', !inCombat);
-  }
-  // the juice arc has a second reason to be hidden — no Juice Capacitor yet —
-  // so it can't just ride along with the rest
-  juiceSvg.classList.toggle('hidden', !inCombat || me.juiceMax < 1);
-  ui.bannerRound.textContent = state.round > 0 ? `Round ${state.round}` : 'Lobby';
-  ui.bannerPhase.textContent = phase;
-  ui.bannerClock.textContent = state.phaseEndTick > 0 ? mmss(remaining) : '';
   ui.scrapTag.textContent = `${Math.floor(me.scrap)} scrap`;
 
   const hullFrac = me.maxHull > 0 ? me.hull / me.maxHull : 0;
@@ -1503,8 +1625,9 @@ function syncUi(room) {
 
   renderWeapons(me);
   renderHint(me);
+  renderHudUpgrades(me);
 
-  const dead = !me.alive && inCombat;
+  const dead = !me.alive;
   ui.respawn.classList.toggle('hidden', !dead);
   if (dead) {
     const secs = Math.max(0, (me.respawnTick - estimatedTick()) * TICK_DT);

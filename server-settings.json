@@ -1,6 +1,6 @@
 {
   "maxSpeed": 70,
-  "thrustAccel": 0.6,
+  "thrustAccel": 0.5,
   "drag": 0.05,
   "dashImpulse": 38,
   "baseHull": 100,
@@ -8,5 +8,7 @@
   "enemyFireSounds": false,
   "reticleCoolingColor": "#6ec387",
   "reticleReadyColor": "#00ff66",
-  "explosionInheritVelocity": true
+  "explosionInheritVelocity": true,
+  "respawnDelaySec": 5,
+  "passiveScrapPerSecond": 2
 }
