@@ -9,6 +9,7 @@ const PORT = Number(process.env.PORT) || 2567;
 
 const app = express();
 app.use(express.static(path.join(__dirname, '..', 'public')));
+app.use('/audio', express.static(path.join(__dirname, '..', 'audio')));
 // Serve the Colyseus client library straight from node_modules so the
 // browser always gets the exact version the server was tested against.
 app.use(

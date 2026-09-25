@@ -428,14 +428,78 @@
       </div>
     </section>
 
+    <!-- Gameplay, Audio & Visual Tuning Section -->
+    <section class="section-presets" style="margin-top: 0.5rem;">
+      <div class="preset-title">Combat, Audio & HUD Customization</div>
+    </section>
+
+    <section class="settings-grid">
+      <!-- Enemy Fire Sounds -->
+      <div class="setting-card">
+        <div class="setting-header">
+          <span class="setting-name">🔊 Enemy Fire Sounds</span>
+          <span id="badge-enemyFireSounds" class="setting-badge">Off</span>
+        </div>
+        <p class="setting-desc">Play audio when opponents and bots discharge weapons. Disabled by default so you only hear your own fire.</p>
+        <div class="slider-row" style="display:flex; align-items:center; gap:0.75rem;">
+          <input id="toggle-enemyFireSounds" type="checkbox" style="width:20px; height:20px; accent-color:var(--neon-cyan); cursor:pointer;" />
+          <label for="toggle-enemyFireSounds" style="font-size:0.85rem; color:var(--dim); cursor:pointer;">Hear opponent/bot weapon audio</label>
+        </div>
+      </div>
+
+      <!-- Explosion Momentum -->
+      <div class="setting-card">
+        <div class="setting-header">
+          <span class="setting-name">💥 Explosion Momentum</span>
+          <span id="badge-explosionInheritVelocity" class="setting-badge">Active</span>
+        </div>
+        <p class="setting-desc">Death explosion particles inherit the downed ship's velocity vector at destruction.</p>
+        <div class="slider-row" style="display:flex; align-items:center; gap:0.75rem;">
+          <input id="toggle-explosionInheritVelocity" type="checkbox" checked style="width:20px; height:20px; accent-color:var(--neon-cyan); cursor:pointer;" />
+          <label for="toggle-explosionInheritVelocity" style="font-size:0.85rem; color:var(--dim); cursor:pointer;">Particles inherit ship drift velocity</label>
+        </div>
+      </div>
+
+      <!-- Reticle Ready Color -->
+      <div class="setting-card">
+        <div class="setting-header">
+          <span class="setting-name">🎯 Reticle Ready Color</span>
+          <span id="badge-reticleReadyColor" class="setting-badge">#00ff66</span>
+        </div>
+        <p class="setting-desc">Color of crosshair when the current weapon is cycled and ready to fire.</p>
+        <div class="slider-row" style="display:flex; align-items:center; gap:0.75rem;">
+          <input id="picker-reticleReadyColor" type="color" value="#00ff66" style="width:40px; height:32px; border:1px solid var(--line); border-radius:4px; background:transparent; cursor:pointer;" />
+          <input id="text-reticleReadyColor" type="text" value="#00ff66" style="width:90px; background:var(--card); border:1px solid var(--line); border-radius:3px; color:var(--ink); font-family:inherit; padding:0.3rem 0.5rem;" />
+        </div>
+      </div>
+
+      <!-- Reticle Cooldown Color -->
+      <div class="setting-card">
+        <div class="setting-header">
+          <span class="setting-name">⏳ Reticle Cooldown Color</span>
+          <span id="badge-reticleCoolingColor" class="setting-badge">#6ec387</span>
+        </div>
+        <p class="setting-desc">Color of crosshair while the current weapon is on cooldown.</p>
+        <div class="slider-row" style="display:flex; align-items:center; gap:0.75rem;">
+          <input id="picker-reticleCoolingColor" type="color" value="#6ec387" style="width:40px; height:32px; border:1px solid var(--line); border-radius:4px; background:transparent; cursor:pointer;" />
+          <input id="text-reticleCoolingColor" type="text" value="#6ec387" style="width:90px; background:var(--card); border:1px solid var(--line); border-radius:3px; color:var(--ink); font-family:inherit; padding:0.3rem 0.5rem;" />
+        </div>
+      </div>
+    </section>
+
     <!-- Footer Actions -->
     <div class="footer-actions">
       <div id="live-indicator">
         <span>🔄 Changes sync instantly to active matches</span>
       </div>
-      <button id="reset-defaults-btn" type="button" class="action-btn reset-btn">
-        ↺ Reset to Defaults
-      </button>
+      <div style="display:flex; gap:0.75rem; flex-wrap:wrap;">
+        <button id="reset-defaults-btn" type="button" class="action-btn reset-btn">
+          ↺ Reset to Defaults
+        </button>
+        <button id="promote-btn" type="button" class="action-btn" style="border-color:var(--neon-green); color:var(--neon-green); font-weight:bold;">
+          💾 Promote to Defaults
+        </button>
+      </div>
     </div>
   </main>
 
@@ -530,6 +594,47 @@
       numInput?.addEventListener('change', (e) => applyLocal(e.target.value, true));
     });
 
+    // --- Audio, Explosion & Reticle settings handlers ---
+    const toggleEnemyFire = document.getElementById('toggle-enemyFireSounds');
+    const badgeEnemyFire = document.getElementById('badge-enemyFireSounds');
+    toggleEnemyFire?.addEventListener('change', (e) => {
+      const checked = e.target.checked;
+      if (badgeEnemyFire) badgeEnemyFire.textContent = checked ? 'On' : 'Off';
+      queueSettingChange('enemyFireSounds', checked);
+    });
+
+    const toggleExpVel = document.getElementById('toggle-explosionInheritVelocity');
+    const badgeExpVel = document.getElementById('badge-explosionInheritVelocity');
+    toggleExpVel?.addEventListener('change', (e) => {
+      const checked = e.target.checked;
+      if (badgeExpVel) badgeExpVel.textContent = checked ? 'Active' : 'Off';
+      queueSettingChange('explosionInheritVelocity', checked);
+    });
+
+    const pickerReady = document.getElementById('picker-reticleReadyColor');
+    const textReady = document.getElementById('text-reticleReadyColor');
+    const badgeReady = document.getElementById('badge-reticleReadyColor');
+    function updateReadyColor(color, triggerSend) {
+      if (pickerReady && pickerReady.value !== color) pickerReady.value = color;
+      if (textReady && textReady.value !== color) textReady.value = color;
+      if (badgeReady) { badgeReady.textContent = color; badgeReady.style.color = color; }
+      if (triggerSend) queueSettingChange('reticleReadyColor', color);
+    }
+    pickerReady?.addEventListener('input', (e) => updateReadyColor(e.target.value, true));
+    textReady?.addEventListener('change', (e) => updateReadyColor(e.target.value, true));
+
+    const pickerCooling = document.getElementById('picker-reticleCoolingColor');
+    const textCooling = document.getElementById('text-reticleCoolingColor');
+    const badgeCooling = document.getElementById('badge-reticleCoolingColor');
+    function updateCoolingColor(color, triggerSend) {
+      if (pickerCooling && pickerCooling.value !== color) pickerCooling.value = color;
+      if (textCooling && textCooling.value !== color) textCooling.value = color;
+      if (badgeCooling) { badgeCooling.textContent = color; badgeCooling.style.color = color; }
+      if (triggerSend) queueSettingChange('reticleCoolingColor', color);
+    }
+    pickerCooling?.addEventListener('input', (e) => updateCoolingColor(e.target.value, true));
+    textCooling?.addEventListener('change', (e) => updateCoolingColor(e.target.value, true));
+
     document.querySelectorAll('.preset-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
         const presetKey = btn.dataset.preset;
@@ -576,7 +681,31 @@
         if (numInput) numInput.value = val;
         if (badge && fieldDef) badge.textContent = fieldDef.fmt(val);
       });
-      if (room) room.send('setServerSettings', std);
+
+      updateReadyColor('#00ff66', false);
+      updateCoolingColor('#6ec387', false);
+      if (toggleEnemyFire) toggleEnemyFire.checked = false;
+      if (badgeEnemyFire) badgeEnemyFire.textContent = 'Off';
+      if (toggleExpVel) toggleExpVel.checked = true;
+      if (badgeExpVel) badgeExpVel.textContent = 'Active';
+
+      if (room) {
+        room.send('setServerSettings', {
+          ...std,
+          enemyFireSounds: false,
+          reticleReadyColor: '#00ff66',
+          reticleCoolingColor: '#6ec387',
+          explosionInheritVelocity: true,
+        });
+      }
+    });
+
+    document.getElementById('promote-btn')?.addEventListener('click', () => {
+      if (!room) return;
+      room.send('promoteServerSettings');
+      if (liveIndicator) {
+        liveIndicator.textContent = '💾 Promoting settings to server-settings.json...';
+      }
     });
 
     // Connect as observer
@@ -592,8 +721,39 @@
         statusBadge.className = 'status-badge connected';
         statusText.textContent = 'Connected (Live)';
 
+        const $ = Colyseus.getStateCallbacks ? Colyseus.getStateCallbacks(room) : (t) => t;
+
+        function syncAllFromState() {
+          fields.forEach(({ key, fmt }) => {
+            const val = room.state[key];
+            if (val !== undefined && val !== null) {
+              const slider = document.getElementById(`slider-${key}`);
+              const numInput = document.getElementById(`num-${key}`);
+              const badge = document.getElementById(`badge-${key}`);
+              if (slider && document.activeElement !== slider) slider.value = val;
+              if (numInput && document.activeElement !== numInput) numInput.value = val;
+              if (badge) badge.textContent = fmt(val);
+            }
+          });
+          if (room.state.enemyFireSounds !== undefined) {
+            if (toggleEnemyFire) toggleEnemyFire.checked = Boolean(room.state.enemyFireSounds);
+            if (badgeEnemyFire) badgeEnemyFire.textContent = room.state.enemyFireSounds ? 'On' : 'Off';
+          }
+          if (room.state.explosionInheritVelocity !== undefined) {
+            if (toggleExpVel) toggleExpVel.checked = Boolean(room.state.explosionInheritVelocity);
+            if (badgeExpVel) badgeExpVel.textContent = room.state.explosionInheritVelocity ? 'Active' : 'Off';
+          }
+          if (room.state.reticleReadyColor) updateReadyColor(room.state.reticleReadyColor, false);
+          if (room.state.reticleCoolingColor) updateCoolingColor(room.state.reticleCoolingColor, false);
+        }
+
+        syncAllFromState();
+        if (room.onStateChange && room.onStateChange.once) {
+          room.onStateChange.once(syncAllFromState);
+        }
+
         fields.forEach(({ key, fmt }) => {
-          room.state.listen(key, (value) => {
+          $(room.state).listen(key, (value) => {
             if (value === undefined || value === null) return;
             const slider = document.getElementById(`slider-${key}`);
             const numInput = document.getElementById(`num-${key}`);
@@ -602,6 +762,35 @@
             if (numInput && document.activeElement !== numInput) numInput.value = value;
             if (badge) badge.textContent = fmt(value);
           });
+        });
+
+        $(room.state).listen('enemyFireSounds', (val) => {
+          if (val === undefined || val === null) return;
+          if (toggleEnemyFire) toggleEnemyFire.checked = Boolean(val);
+          if (badgeEnemyFire) badgeEnemyFire.textContent = val ? 'On' : 'Off';
+        });
+
+        $(room.state).listen('explosionInheritVelocity', (val) => {
+          if (val === undefined || val === null) return;
+          if (toggleExpVel) toggleExpVel.checked = Boolean(val);
+          if (badgeExpVel) badgeExpVel.textContent = val ? 'Active' : 'Off';
+        });
+
+        $(room.state).listen('reticleReadyColor', (val) => {
+          if (val) updateReadyColor(val, false);
+        });
+
+        $(room.state).listen('reticleCoolingColor', (val) => {
+          if (val) updateCoolingColor(val, false);
+        });
+
+        room.onMessage('serverSettingsPromoted', () => {
+          if (liveIndicator) {
+            liveIndicator.textContent = '⭐ Promoted! Saved as new defaults in server-settings.json';
+            setTimeout(() => {
+              liveIndicator.textContent = '🔄 Changes sync instantly to active matches';
+            }, 3500);
+          }
         });
 
         room.onLeave(() => {

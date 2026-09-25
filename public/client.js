@@ -3,7 +3,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import {
   BOLT_SPEED, SHOT_FX, createBlast, disposeBlast, disposeFx, updateBlast,
 } from './weapon-fx.js';
-import { initAudio, play as playSound, toggleMute } from './audio.js';
+import { initAudio, play as playSound, toggleMute, startEngineLoop, stopEngineLoop } from './audio.js';
 import {
   getActiveExplosionConfig,
   spawnOneShotExplosion,
@@ -117,8 +117,42 @@ const sendInput = () => currentRoom?.send('input', {
 const TRIGGER_REPEAT_MS = 60;
 const triggersDown = new Set();
 let triggerTimer = null;
+let lastMyFireTime = 0;
+
+function getWeaponCooldownMs(player, weaponId) {
+  switch (weaponId) {
+    case 'rail': {
+      const tier = player?.tech?.get ? (player.tech.get('railCycle') ?? 0) : 0;
+      return 1400 - 250 * tier;
+    }
+    case 'bolt': {
+      const tier = player?.tech?.get ? (player.tech.get('boltCadence') ?? 0) : 0;
+      return 300 - 60 * tier;
+    }
+    case 'flak':
+      return 800;
+    case 'ram':
+      return 5000;
+    default:
+      return 500;
+  }
+}
+
+function isWeaponReady(player) {
+  if (!player) return true;
+  const weaponId = player.weapon || 'rail';
+  if (weaponId === 'ram') {
+    if ((player.ramReadyTick ?? 0) > estimatedTick()) return false;
+  }
+  const cd = getWeaponCooldownMs(player, weaponId);
+  return (performance.now() - lastMyFireTime) >= cd;
+}
 
 const sendFire = () => {
+  const myPlayer = currentRoom?.state?.players?.get?.(currentRoom.sessionId);
+  if (myPlayer && isWeaponReady(myPlayer)) {
+    lastMyFireTime = performance.now();
+  }
   if (typeof flushLookBatch === 'function') flushLookBatch(performance.now());
   currentRoom?.send('fire', {
     // seq lets the server aim with exactly the orientation we predicted;
@@ -214,17 +248,36 @@ window.addEventListener('keyup', (e) => {
   if (TRACKED.has(key)) { held.delete(key); sendInput(); }
 });
 
-// Mouse wheel dials the fuse distance for weapons that detonate at a set
-// range. Tracked optimistically so the readout responds instantly; the server
-// clamps and replicates the authoritative value back.
+// Camera FOV zoom (45° to 85°): scrolled with mouse wheel when pointer locked.
+const BASE_FOV = 70;
+const MIN_FOV = 45;
+const MAX_FOV = 85;
+const FOV_STEP = 5;
+let targetFov = BASE_FOV;
+let currentBaseFov = BASE_FOV;
+
+// Weapons that detonate at a set range (e.g. flak) can dial fuse with Alt+wheel or Ctrl+wheel.
 let fuse = 40;
 const FUSE_STEP = 5;
 window.addEventListener('wheel', (e) => {
   if (!currentRoom || document.pointerLockElement !== gameCanvas) return;
   e.preventDefault();
-  fuse = Math.max(5, Math.min(200, fuse - Math.sign(e.deltaY) * FUSE_STEP));
-  currentRoom.send('setFuse', fuse);
+
+  const me = currentRoom.state?.players?.get(currentRoom.sessionId);
+  if ((e.altKey || e.ctrlKey) && me?.weapon === 'flak') {
+    fuse = Math.max(5, Math.min(200, fuse - Math.sign(e.deltaY) * FUSE_STEP));
+    currentRoom.send('setFuse', fuse);
+    return;
+  }
+
+  // Scroll up (deltaY < 0): zoom in -> smaller FOV (down to 45°)
+  // Scroll down (deltaY > 0): zoom out -> wider FOV (up to 85°)
+  const delta = Math.abs(e.deltaY) >= 50
+    ? Math.sign(e.deltaY) * FOV_STEP
+    : (e.deltaY / 100) * FOV_STEP;
+  targetFov = Math.max(MIN_FOV, Math.min(MAX_FOV, targetFov + delta));
 }, { passive: false });
+
 
 // --- optimistic look: our own orientation, applied locally the instant the
 // input happens and reproduced by the server from the same batches ---
@@ -275,6 +328,12 @@ const gameCanvas = document.getElementById('game');
 // click that grabs the mouse is the player saying "let me in", not "shoot" —
 // firing on it would put a shot downrange before they'd even seen the frame.
 gameCanvas.addEventListener('mousedown', (e) => {
+  if (e.button === 1) {
+    // Middle click resets zoom to default 70°
+    e.preventDefault();
+    targetFov = BASE_FOV;
+    return;
+  }
   if (e.button !== 0) return;
   if (!currentRoom) return;
   const phase = currentRoom.state?.phase;
@@ -286,6 +345,9 @@ gameCanvas.addEventListener('mousedown', (e) => {
   }
   e.preventDefault();
   pullTrigger('mouse');
+});
+window.addEventListener('auxclick', (e) => {
+  if (e.button === 1) e.preventDefault();
 });
 window.addEventListener('mouseup', (e) => { if (e.button === 0) releaseTrigger('mouse'); });
 let lookDX = 0, lookDY = 0;
@@ -526,11 +588,7 @@ function renderJuice(juice) {
 // vision, not looked at.
 const vignetteEl = document.getElementById('vignette');
 const speedlinesEl = document.getElementById('speedlines');
-const BASE_FOV = 70;
-const FOV_GAIN = 6;        // degrees of extra FOV at full speed
-// Doubled with MAX_WISH in src/game/tuning.ts. These are absolute speeds, so
-// at the old values the FOV kick and vignette would sit pinned at full the
-// moment you touched W — the cue stops being a cue when it's always on.
+// Continuous: corners darken with speed. Triggered: a dash adds a brief contrast lift plus edge streaks.
 const SPEED_FX_LO = 20;    // units/s where the speed cue starts appearing
 const SPEED_FX_HI = 110;   // ...and where it's fully applied
 const VIGNETTE_MAX = 0.3;
@@ -551,15 +609,16 @@ function noteJuice(juice) {
 }
 
 function renderSpeedFx(camera, canvas, speed, dt) {
-  // smoothed: velocity is only patched in at the server's rate, and feeding
-  // that to the FOV raw makes it judder
-  const target = Math.min(1, Math.max(0, (speed - SPEED_FX_LO) / (SPEED_FX_HI - SPEED_FX_LO)));
-  speedFx += (target - speedFx) * Math.min(1, dt * 6);
-  const fov = BASE_FOV + FOV_GAIN * speedFx;
-  if (Math.abs(fov - camera.fov) > 0.01) {
-    camera.fov = fov;
+  // Smoothly interpolate currentBaseFov towards targetFov strictly driven by thumbwheel zoom
+  currentBaseFov += (targetFov - currentBaseFov) * Math.min(1, dt * 20);
+  if (Math.abs(currentBaseFov - camera.fov) > 0.01) {
+    camera.fov = currentBaseFov;
     camera.updateProjectionMatrix();
   }
+
+  // Speed cues: vignette and dash feedback only (no FOV distortion on acceleration)
+  const target = Math.min(1, Math.max(0, (speed - SPEED_FX_LO) / (SPEED_FX_HI - SPEED_FX_LO)));
+  speedFx += (target - speedFx) * Math.min(1, dt * 6);
   vignetteEl.style.opacity = (VIGNETTE_MAX * speedFx).toFixed(3);
 
   if (dashFx > 0) {
@@ -1096,8 +1155,11 @@ const ui = {
   fpsTag: document.getElementById('fps-tag'),
   openSettingsBtn: document.getElementById('open-settings-btn'),
   openExpLabBtn: document.getElementById('open-exp-lab-btn'),
+  openAttribBtn: document.getElementById('open-attrib-btn'),
+  joinAttribBtn: document.getElementById('join-attrib-btn'),
   overlaySettingsBtn: document.getElementById('overlay-settings-btn'),
   overlayLabBtn: document.getElementById('overlay-lab-btn'),
+  overlayAttribBtn: document.getElementById('overlay-attrib-btn'),
 };
 
 // --- hit confirmation -----------------------------------------------------
@@ -1193,10 +1255,20 @@ function openExplosionLabTab() {
   window.open('/explosion-lab.html', '_blank');
 }
 
+function openAttributionsTab() {
+  if (document.pointerLockElement) {
+    document.exitPointerLock?.();
+  }
+  window.open('/attributions.html', '_blank');
+}
+
 ui.openSettingsBtn?.addEventListener('click', openSettingsTab);
 ui.openExpLabBtn?.addEventListener('click', openExplosionLabTab);
+ui.openAttribBtn?.addEventListener('click', openAttributionsTab);
+ui.joinAttribBtn?.addEventListener('click', openAttributionsTab);
 ui.overlaySettingsBtn?.addEventListener('click', openSettingsTab);
 ui.overlayLabBtn?.addEventListener('click', openExplosionLabTab);
+ui.overlayAttribBtn?.addEventListener('click', openAttributionsTab);
 
 const mmss = (seconds) => {
   const s = Math.max(0, Math.ceil(seconds));
@@ -1355,7 +1427,7 @@ function renderWeapons(me) {
   });
   // the fuse readout is only meaningful to weapons that detonate at a range
   ui.fuseTag.classList.toggle('hidden', me.weapon !== 'flak');
-  ui.fuseTag.textContent = `fuse ${Math.round(me.fuse)} · wheel to adjust`;
+  ui.fuseTag.textContent = `fuse ${Math.round(me.fuse)} · alt+wheel to adjust`;
 
   // Ram cooldown. Shown whenever you OWN the ram, not only while it's
   // selected: the whole point of a five-second lockout is planning around
@@ -1374,6 +1446,8 @@ function renderHint(me) {
   const parts = [
     'click canvas to capture mouse',
     'mouse: yaw/pitch',
+    'wheel: zoom',
+    'middle click: reset zoom',
     'q/e: roll',
     'wasd: move',
   ];
@@ -1392,12 +1466,24 @@ function renderHint(me) {
  * per frame: none of this needs 60Hz, and rebuilding cards that often would
  * make them unclickable.
  */
+let lastAudioPhase = null;
 function syncUi(room) {
   const state = room.state;
   const me = state.players?.get(room.sessionId);
   if (!me) return;
   const phase = state.phase;
   const inCombat = phase === 'combat';
+
+  // Engine sound runs only when movement is allowed in the 3D world (combat phase),
+  // and stops when the round ends (intermission / shop / lobby).
+  if (phase !== lastAudioPhase) {
+    if (phase === 'combat') {
+      startEngineLoop();
+    } else {
+      stopEngineLoop();
+    }
+    lastAudioPhase = phase;
+  }
 
   // --- overlay ---
   const showOverlay = !inCombat;
@@ -1749,6 +1835,7 @@ async function startGame(room) {
   const coarseGrid = new THREE.GridHelper(3000, 60, 0x2a3260, 0x151c38); // 50 units/cell
   coarseGrid.position.y = -0.05;
   gridGroup.add(fineGrid, coarseGrid);
+  gridGroup.visible = false; // Turned off by default; press 'g' to toggle on
   scene.add(gridGroup);
   activeGrid = gridGroup;
 
@@ -1799,7 +1886,7 @@ async function startGame(room) {
 
   // far plane has to clear the star sphere at 16,000 km; the log buffer above
   // is what makes a range this wide survivable
-  const camera = new THREE.PerspectiveCamera(70, canvas.clientWidth / canvas.clientHeight, 0.1, 25000000);
+  const camera = new THREE.PerspectiveCamera(BASE_FOV, canvas.clientWidth / canvas.clientHeight, 0.1, 25000000);
 
   // Canvas size changes on window resize AND on entering/leaving fullscreen;
   // without this the projection keeps the old aspect and everything stretches.
@@ -1918,6 +2005,9 @@ async function startGame(room) {
     const fx = SHOT_FX[shot.kind];
     if (!fx) return; // a weapon whose FX aren't implemented yet
     const mine = shot.shooter === room.sessionId;
+    if (mine) {
+      lastMyFireTime = performance.now();
+    }
     const origin = new THREE.Vector3(shot.ox, shot.oy, shot.oz);
     const built = fx.create({
       origin,
@@ -1935,7 +2025,11 @@ async function startGame(room) {
     // the server may have dropped the pull for cooldown, and a gun that
     // clicks when it didn't actually shoot teaches the wrong cadence. Our
     // own shots skip attenuation so they stay at the front of the mix.
-    playSound(shot.kind, mine ? undefined : camera.position.distanceTo(origin));
+    // Non-local fire audio respects the enemyFireSounds server setting (default false).
+    const playSoundForShot = mine || (room.state.enemyFireSounds ?? false);
+    if (playSoundForShot) {
+      playSound(shot.kind, mine ? undefined : camera.position.distanceTo(origin));
+    }
   });
 
   $(room.state).shots.onRemove((_shot, id) => {
@@ -1961,7 +2055,24 @@ async function startGame(room) {
 
     if (blast.kind === 'death') {
       const config = getActiveExplosionConfig();
-      const oneShot = spawnOneShotExplosion(scene, blastPos, config);
+      let vel = undefined;
+      if (room.state.explosionInheritVelocity !== false) {
+        vel = new THREE.Vector3(blast.vx || 0, blast.vy || 0, blast.vz || 0);
+        if (vel.lengthSq() === 0) {
+          // Fallback: search players for a downed player near the blast location
+          let bestDist = 25;
+          room.state.players?.forEach((p) => {
+            if (!p.alive) {
+              const d = blastPos.distanceTo(new THREE.Vector3(p.x, p.y, p.z));
+              if (d < bestDist) {
+                bestDist = d;
+                vel.set(p.vx, p.vy, p.vz);
+              }
+            }
+          });
+        }
+      }
+      const oneShot = spawnOneShotExplosion(scene, blastPos, config, vel);
       activeOneShots.add(oneShot);
       return;
     }
@@ -2030,6 +2141,7 @@ async function startGame(room) {
     running = false;
     currentRoom = null;
     activeGrid = null;
+    stopEngineLoop();
     held.clear();
     releaseTrigger();
     // registered per session in startGame, so they have to come back off or
@@ -2157,6 +2269,18 @@ async function startGame(room) {
       speed = Math.hypot(myState.vx, myState.vy, myState.vz);
       ui.hud.textContent = `speed ${speed.toFixed(1)} · ${currentFps} FPS`;
       renderRoster(room.state.players, room.sessionId, listItems);
+
+      if (reticleEl) {
+        const ready = isWeaponReady(myState);
+        reticleEl.classList.toggle('ready', ready);
+        reticleEl.classList.toggle('cooling', !ready);
+        if (room.state.reticleCoolingColor) {
+          reticleEl.style.setProperty('--reticle-cooling-color', room.state.reticleCoolingColor);
+        }
+        if (room.state.reticleReadyColor) {
+          reticleEl.style.setProperty('--reticle-ready-color', room.state.reticleReadyColor);
+        }
+      }
     } else {
       ui.hud.textContent = `speed 0.0 · ${currentFps} FPS`;
     }

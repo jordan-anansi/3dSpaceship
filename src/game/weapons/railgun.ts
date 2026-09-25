@@ -94,9 +94,14 @@ export const railgun: WeaponDef = {
     // to leading their shots, which is strictly better than resolving against
     // a world nobody was ever in.
     const positions = ctx.positionsAt(ctx.clientTick) ?? undefined;
+    // Hitscan lag compensation: rewind BOTH targets and shooter to clientTick.
+    // Testing raycast against targets at clientTick requires casting FROM the shooter's
+    // position at that same clientTick, otherwise shooter movement during network transit
+    // shifts the ray off-axis.
+    const origin = positions?.get(ctx.shooterId)?.clone() ?? ctx.origin;
 
     const hit = ctx.sweepShips({
-      from: ctx.origin,
+      from: origin,
       dir: ctx.dir,
       maxDist: RAIL_RANGE,
       radius: hitRadiusOf(ctx.shooter),
@@ -105,7 +110,7 @@ export const railgun: WeaponDef = {
     });
     // Rocks stop the beam, same as bolts — cover has to be real cover against
     // the gun that most wants to shoot across the whole map.
-    const rockDist = ctx.sweepAsteroids(ctx.origin, ctx.dir, RAIL_RANGE);
+    const rockDist = ctx.sweepAsteroids(origin, ctx.dir, RAIL_RANGE);
 
     // Whichever is nearer terminates the beam. sweepAsteroids returns
     // Infinity when the ray is clear, so the min also handles "hit nothing".
@@ -115,6 +120,6 @@ export const railgun: WeaponDef = {
       ctx.damage(hit.id, railgun.damage(ctx.shooter), ctx.shooterId);
     }
 
-    ctx.spawnShot({ kind: 'rail', origin: ctx.origin, dir: ctx.dir, param: beamLen });
+    ctx.spawnShot({ kind: 'rail', origin, dir: ctx.dir, param: beamLen });
   },
 };
