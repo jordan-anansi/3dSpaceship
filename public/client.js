@@ -322,10 +322,6 @@ window.addEventListener('keydown', (e) => {
     if (activeGrid) activeGrid.visible = !activeGrid.visible;
     return;
   }
-  if (key === 'x') {
-    openExplosionLabTab();
-    return;
-  }
   if (key === 'o' || key === '`') {
     openSettingsTab();
     return;
@@ -1531,7 +1527,7 @@ function renderHint(me) {
   // only worth showing once there's more than the starting railgun to switch to
   const extraGuns = WEAPON_ORDER.filter((w) => w.id !== 'rail' && (me.tech.get(w.id) ?? 0) > 0);
   if (extraGuns.length) parts.push(`1-${WEAPON_ORDER.length}: weapon`);
-  parts.push('tab: hold for upgrade cursor', 'o: server settings', 'x: explosion lab', 'f: fullscreen', 'g: grid', 'm: mute', 'b: bots', 'esc: release mouse');
+  parts.push('tab: hold for upgrade cursor', 'o: server settings', 'f: fullscreen', 'g: grid', 'm: mute', 'b: bots', 'esc: release mouse');
   const text = parts.join('   ');
   if (ui.hint.textContent !== text) ui.hint.textContent = text;
 }

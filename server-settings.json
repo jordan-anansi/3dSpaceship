@@ -5,7 +5,7 @@
   "dashImpulse": 38,
   "baseHull": 100,
   "botCount": 4,
-  "enemyFireSounds": false,
+  "enemyFireSounds": true,
   "reticleCoolingColor": "#6ec387",
   "reticleReadyColor": "#00ff66",
   "explosionInheritVelocity": true,
