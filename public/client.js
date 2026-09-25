@@ -1218,6 +1218,9 @@ const ui = {
   lowerLeftHud: document.getElementById('lower-left-hud'),
   hudUpgrades: document.getElementById('hud-upgrades'),
   upgradesList: document.getElementById('upgrades-list'),
+  topLeftHud: document.getElementById('top-left-hud'),
+  wealthBoard: document.getElementById('wealth-board'),
+  wealthList: document.getElementById('wealth-list'),
   overlaySettingsBtn: document.getElementById('overlay-settings-btn'),
   overlayLabBtn: document.getElementById('overlay-lab-btn'),
   overlayAttribBtn: document.getElementById('overlay-attrib-btn'),
@@ -1537,7 +1540,7 @@ let lastUpgradesSignature = '';
 function renderHudUpgrades(me) {
   if (!ui.upgradesList) return;
   const signature = `${me.scrap | 0}|` +
-    (me.upgrades ? me.upgrades.map((c) => `${c.id}:${c.tier}:${c.cost}`).join(',') : '');
+    (me.upgrades ? me.upgrades.map((c) => `${c.id}:${c.tier}:${c.cost}:${c.locked}:${c.maxed}`).join(',') : '');
   if (signature === lastUpgradesSignature) return;
   lastUpgradesSignature = signature;
 
@@ -1553,29 +1556,61 @@ function renderHudUpgrades(me) {
   }
 
   me.upgrades.forEach((card) => {
-    const affordable = me.scrap >= card.cost;
+    const isLocked = Boolean(card.locked);
+    const isMaxed = Boolean(card.maxed);
+    const affordable = !isLocked && !isMaxed && me.scrap >= card.cost;
+
     const row = document.createElement('div');
-    row.className = `hud-up-row${affordable ? ' affordable' : ''}`;
+    if (isMaxed) {
+      row.className = 'hud-up-row maxed';
+    } else if (isLocked) {
+      row.className = 'hud-up-row locked';
+    } else {
+      row.className = `hud-up-row${affordable ? ' affordable' : ''}`;
+    }
 
     const name = document.createElement('div');
     name.className = 'up-name';
     name.textContent = card.name;
-    name.title = card.blurb;
+    if (isLocked) {
+      name.title = `🔒 Locked: requires ${card.requires}\n${card.blurb}`;
+    } else {
+      name.title = card.blurb;
+    }
 
     const tier = document.createElement('div');
     tier.className = 'up-tier';
-    tier.textContent = `T${card.tier}/${card.maxTier}`;
+    tier.textContent = isMaxed ? 'MAX' : (isLocked ? `—/${card.maxTier}` : `T${card.tier}/${card.maxTier}`);
 
     const cost = document.createElement('div');
-    cost.className = `up-cost${affordable ? '' : ' cant'}`;
-    cost.textContent = `${card.cost} ⚙`;
+    if (isMaxed) {
+      cost.className = 'up-cost';
+      cost.textContent = 'MAX';
+    } else if (isLocked) {
+      cost.className = 'up-cost cant';
+      cost.textContent = 'LOCKED';
+      cost.title = `Requires ${card.requires}`;
+    } else {
+      cost.className = `up-cost${affordable ? '' : ' cant'}`;
+      cost.textContent = `${card.cost} ⚙`;
+    }
 
     const btn = document.createElement('button');
     btn.className = 'up-btn';
     btn.type = 'button';
-    btn.textContent = '+';
-    btn.title = `Upgrade ${card.name} (${card.cost} scrap)`;
-    btn.disabled = !affordable;
+    if (isMaxed) {
+      btn.textContent = '✓';
+      btn.disabled = true;
+      btn.title = `${card.name} is fully upgraded`;
+    } else if (isLocked) {
+      btn.textContent = '🔒';
+      btn.disabled = true;
+      btn.title = `Locked: requires ${card.requires}`;
+    } else {
+      btn.textContent = '+';
+      btn.disabled = !affordable;
+      btn.title = `Upgrade ${card.name} (${card.cost} scrap)`;
+    }
 
     btn.addEventListener('mousedown', (e) => {
       e.stopPropagation();
@@ -1583,12 +1618,55 @@ function renderHudUpgrades(me) {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       e.preventDefault();
-      currentRoom?.send('buy', { id: card.id });
+      if (isLocked || isMaxed || !affordable) return;
       playSound('buy');
+      currentRoom?.send('buy', { id: card.id });
     });
 
     row.append(name, tier, cost, btn);
     ui.upgradesList.appendChild(row);
+  });
+}
+
+let lastWealthSignature = '';
+function renderWealthBoard(players, myId) {
+  if (!ui.wealthList || !players) return;
+
+  const list = [];
+  players.forEach((p, id) => {
+    list.push({
+      id,
+      name: id === myId ? `${p.name} (you)` : p.name,
+      isMe: id === myId,
+      isBot: Boolean(p.isBot),
+      alive: Boolean(p.alive),
+      scrap: Math.floor(p.scrap || 0),
+    });
+  });
+  list.sort((a, b) => b.scrap - a.scrap);
+
+  const sig = list.map((p) => `${p.id}:${p.scrap}:${p.alive}`).join('|');
+  if (sig === lastWealthSignature) return;
+  lastWealthSignature = sig;
+
+  ui.wealthList.replaceChildren();
+  list.forEach((p, idx) => {
+    const row = document.createElement('div');
+    row.className = `wealth-row${p.isMe ? ' me' : ''}${p.isBot ? ' bot' : ''}${p.alive ? '' : ' dead'}${idx === 0 && p.scrap > 0 ? ' top-bounty' : ''}`;
+
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'pilot-name';
+    nameSpan.textContent = p.name;
+    if (idx === 0 && p.scrap > 0) {
+      nameSpan.title = 'Current Highest Bounty!';
+    }
+
+    const scrapSpan = document.createElement('span');
+    scrapSpan.className = 'pilot-scrap';
+    scrapSpan.textContent = `${p.scrap} 🪙`;
+
+    row.append(nameSpan, scrapSpan);
+    ui.wealthList.appendChild(row);
   });
 }
 
@@ -1604,6 +1682,9 @@ function syncUi(room) {
   ui.overlay?.classList.add('hidden');
   ui.banner?.classList.add('hidden');
   ui.lowerLeftHud?.classList.remove('hidden');
+  ui.topLeftHud?.classList.remove('hidden');
+
+  renderWealthBoard(state.players, room.sessionId);
 
   for (const el of [ui.scrapTag, ui.weaponStrip, ui.killfeed, reticleEl]) {
     el?.classList.remove('hidden');

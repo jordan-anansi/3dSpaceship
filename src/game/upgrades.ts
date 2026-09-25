@@ -36,8 +36,37 @@ const SHIP_CARDS: CatalogEntry[] = [
     baseCost: 150,
     costMult: 1,
   },
+  {
+    id: 'juiceCap',
+    name: 'Juice Capacity',
+    kind: 'upgrade',
+    blurb: (t) => `${JUICE_MAX + t - 1} → ${JUICE_MAX + t} dash charges.`,
+    maxTier: 2,
+    baseCost: 140,
+    costMult: 1.8,
+    requires: 'juice',
+  },
+  {
+    id: 'juiceRegen',
+    name: 'Juice Recharge',
+    kind: 'upgrade',
+    blurb: (t) => `Charge refill ${(JUICE_REGEN_SEC - 1.2 * (t - 1)).toFixed(1)}s → ${(JUICE_REGEN_SEC - 1.2 * t).toFixed(1)}s.`,
+    maxTier: 3,
+    baseCost: 110,
+    costMult: 1.6,
+    requires: 'juice',
+  },
 
-  // --- upgrades ---
+  // --- ship hull & flight upgrades ---
+  {
+    id: 'plating',
+    name: 'Hull Plating',
+    kind: 'upgrade',
+    blurb: (t) => `Max hull +${30 * t}.`,
+    maxTier: 4,
+    baseCost: 90,
+    costMult: 1.6,
+  },
   {
     id: 'overdrive',
     name: 'Overdrive',
@@ -58,35 +87,6 @@ const SHIP_CARDS: CatalogEntry[] = [
     maxTier: 3,
     baseCost: 80,
     costMult: 1.6,
-  },
-  {
-    id: 'plating',
-    name: 'Hull Plating',
-    kind: 'upgrade',
-    blurb: (t) => `Max hull +${30 * t}.`,
-    maxTier: 4,
-    baseCost: 90,
-    costMult: 1.6,
-  },
-  {
-    id: 'juiceCap',
-    name: 'Juice Capacity',
-    kind: 'upgrade',
-    blurb: (t) => `${JUICE_MAX + t - 1} → ${JUICE_MAX + t} dash charges.`,
-    maxTier: 2,
-    baseCost: 140,
-    costMult: 1.8,
-    requires: 'juice',
-  },
-  {
-    id: 'juiceRegen',
-    name: 'Juice Recharge',
-    kind: 'upgrade',
-    blurb: (t) => `Charge refill ${(JUICE_REGEN_SEC - 1.2 * (t - 1)).toFixed(1)}s → ${(JUICE_REGEN_SEC - 1.2 * t).toFixed(1)}s.`,
-    maxTier: 3,
-    baseCost: 110,
-    costMult: 1.6,
-    requires: 'juice',
   },
 ];
 
@@ -145,45 +145,36 @@ export function applyStats(player: Player, baseSettings?: BaseWorldSettings) {
   return stats;
 }
 
-const available = (player: Player, entry: CatalogEntry) => {
-  if (entry.requires && tierOf(player, entry.requires) === 0) return false;
-  return tierOf(player, entry.id) < entry.maxTier;
-};
-
 function makeCard(player: Player, entry: CatalogEntry) {
-  const tier = tierOf(player, entry.id) + 1;
+  const currentTier = tierOf(player, entry.id);
+  const nextTier = Math.min(entry.maxTier, currentTier + 1);
+  const isLocked = Boolean(entry.requires && tierOf(player, entry.requires) === 0);
+  const isMaxed = currentTier >= entry.maxTier;
+
   const card = new Card();
   card.id = entry.id;
   card.kind = entry.kind;
   card.name = entry.name;
-  card.blurb = entry.blurb(tier);
-  card.tier = tier;
+  card.blurb = entry.blurb(nextTier);
+  card.tier = nextTier;
   card.maxTier = entry.maxTier;
-  card.cost = costOf(entry, tier);
+  card.cost = costOf(entry, nextTier);
+  card.locked = isLocked;
+  card.maxed = isMaxed;
+  if (entry.requires) {
+    const parent = byId.get(entry.requires);
+    card.requires = parent?.name ?? entry.requires;
+  }
   return card;
 }
 
-const pick = <T>(pool: T[]) => pool[Math.floor(Math.random() * pool.length)];
-
 /**
- * Rebuild the standing menu of tier-ups: every 'upgrade' entry whose
- * prerequisite is owned and which isn't maxed out yet.
- *
- * This is the half of the shop you can buy from repeatedly. It's a full list
- * rather than a draw on purpose — depth is the thing a player should be able
- * to commit scrap to deliberately ("I want the third Bolt Cadence"), and a
- * random two-card deal turns that into a slot machine. The dealt cards keep
- * the roguelite draw where it belongs: on the UNLOCKS, which are the
- * decisions that change what your ship can do rather than how well.
- *
-/**
- * Rebuild the standing menu of available upgrades & technologies.
- * Every catalog entry whose prerequisite is met and which isn't maxed out yet.
- * As tech (like Juice Capacitor or weapons) is bought, dependent upgrades unlock immediately.
+ * Rebuild the standing menu with ALL catalog items in a stable, consistent order.
+ * Items not yet unlocked are marked card.locked = true so the client can grey them out.
+ * Maxed items are marked card.maxed = true.
  */
 export function refreshUpgrades(player: Player) {
-  const entries = CATALOG.filter((entry) => available(player, entry));
-  player.upgrades = new ArraySchema<Card>(...entries.map((entry) => makeCard(player, entry)));
+  player.upgrades = new ArraySchema<Card>(...CATALOG.map((entry) => makeCard(player, entry)));
 }
 
 // Legacy drawOffer kept for backward compatibility if needed, but unused in continuous mode.
@@ -196,11 +187,9 @@ export function drawOffer(player: Player) {
  * Validated entirely against replicated state.
  */
 export function buy(player: Player, cardId: string, baseSettings?: BaseWorldSettings): string | null {
-  const onMenu = player.upgrades.some((c) => c.id === cardId);
-  if (!onMenu) return 'not on offer';
   const entry = byId.get(cardId);
   if (!entry) return 'unknown upgrade';
-  // re-derive rather than trusting card.cost, which is only a display copy
+  if (entry.requires && tierOf(player, entry.requires) === 0) return 'prerequisite not unlocked';
   const tier = tierOf(player, cardId) + 1;
   if (tier > entry.maxTier) return 'already maxed';
   const cost = costOf(entry, tier);

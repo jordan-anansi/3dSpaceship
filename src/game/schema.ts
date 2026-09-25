@@ -13,6 +13,9 @@ export class Card extends Schema {
   @type('number') tier: number = 1;   // the tier this card would take you TO
   @type('number') maxTier: number = 1;
   @type('number') cost: number = 0;
+  @type('boolean') locked: boolean = false;
+  @type('boolean') maxed: boolean = false;
+  @type('string') requires: string = '';
 }
 
 export class Player extends Schema {
