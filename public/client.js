@@ -246,6 +246,14 @@ const LOOK_INTERVAL = 33;
 // from 0 to full over ROLL_RAMP seconds of holding q/e. Not momentum —
 // releasing (or reversing) drops the rate straight back to zero.
 let rollRamp = 0.6; // seconds to reach full rate; live-tuned by the slider
+// Per-player mouse sensitivity. The server folds its own copy of MOUSE_SENS,
+// so the multiplier has to be baked into the pixel deltas we send rather than
+// into MOUSE_SENS here — otherwise every batch would reconcile as a mismatch.
+let mouseSens = 1;
+// Mirrors MAX_LOOK_PX in LobbyRoom: the server clamps each batch's deltas, so
+// a fast flick at high sensitivity has to clamp identically on this side.
+const MAX_LOOK_PX = 1000;
+const clampLookPx = (v) => Math.max(-MAX_LOOK_PX, Math.min(MAX_LOOK_PX, v));
 const LOCAL_FORWARD = new THREE.Vector3(0, 0, -1);
 const LOCAL_RIGHT = new THREE.Vector3(1, 0, 0);
 const LOCAL_UP = new THREE.Vector3(0, 1, 0);
@@ -313,10 +321,12 @@ function flushLookBatch(nowMs) {
   const avgScale = rollRamp > 0 ? (prevScale + rollScale) / 2 : rollScale;
   const roll = dir * ROLL_RATE * avgScale * dt;
 
-  if (!lookDX && !lookDY && !roll) return;
-  const batch = { seq: ++lookSeq, dx: lookDX, dy: lookDY, roll };
+  const dx = clampLookPx(lookDX * mouseSens);
+  const dy = clampLookPx(lookDY * mouseSens);
   lookDX = 0;
   lookDY = 0;
+  if (!dx && !dy && !roll) return;
+  const batch = { seq: ++lookSeq, dx, dy, roll };
   applyLookBatch(predictedQuat, batch);
   lookHistory.push({ ...batch, q: predictedQuat.clone() });
   if (lookHistory.length > 256) lookHistory.shift();
@@ -357,6 +367,43 @@ document.getElementById('drag-set').addEventListener('click', () => {
   if (Number.isFinite(value)) currentRoom?.send('setDrag', value);
   dragInput.value = '';
   dragInput.blur(); // give the keyboard back to flight controls
+});
+
+// --- mouse sensitivity tuner: per-player and purely client-side (the deltas
+// we send are already scaled, so the server needs no handshake), remembered
+// in localStorage so each player keeps their own setting across sessions ---
+const SENS_MIN = 0.1;
+const SENS_MAX = 5;
+const SENS_KEY = '3dspaceship.mouseSens';
+const sensRange = document.getElementById('sens-range');
+const sensInput = document.getElementById('sens-input');
+const sensCurrent = document.getElementById('sens-current');
+
+// echoField is off while they're typing in the number box — rewriting the text
+// mid-edit would eat the keystrokes ("1." normalising to "1" before the "5").
+function setMouseSens(value, echoField) {
+  mouseSens = Number.isFinite(value) ? Math.max(SENS_MIN, Math.min(SENS_MAX, value)) : 1;
+  sensRange.value = String(mouseSens);
+  if (echoField) sensInput.value = String(Number(mouseSens.toFixed(2)));
+  sensCurrent.textContent = `${mouseSens.toFixed(2)}×`;
+  try { localStorage.setItem(SENS_KEY, String(mouseSens)); } catch { /* storage blocked — setting is just session-only */ }
+}
+
+let savedSens = NaN;
+try { savedSens = parseFloat(localStorage.getItem(SENS_KEY)); } catch { /* ditto */ }
+setMouseSens(savedSens, true);
+
+sensRange.addEventListener('input', () => setMouseSens(parseFloat(sensRange.value), true));
+sensRange.addEventListener('change', () => sensRange.blur());
+sensInput.addEventListener('input', () => {
+  const value = parseFloat(sensInput.value);
+  if (Number.isFinite(value) && value >= SENS_MIN && value <= SENS_MAX) setMouseSens(value, false);
+});
+// change fires on blur/enter: that's when a half-typed or out-of-range entry
+// gets clamped and written back, and when flight controls get the keyboard.
+sensInput.addEventListener('change', () => {
+  setMouseSens(parseFloat(sensInput.value), true);
+  sensInput.blur();
 });
 
 // --- roll ramp-up tuner: purely client-side (the server only ever sees the
