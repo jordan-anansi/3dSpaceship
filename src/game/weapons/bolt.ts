@@ -23,14 +23,15 @@ import type { FireContext, StepContext, WeaponDef } from './types';
 // First-person: the camera sits AT the ship, so the bolt line IS the
 // reticle's centre ray — for distant targets, at least. Bolts take travel
 // time, so moving targets have to be led.
-// Doubled with cruise speed. A bolt has to stay meaningfully faster than the
-// ships it's shot at: at 80 against a target also doing 80, a crossing target
-// simply cannot be led — there is no firing solution at any angle.
-export const BOLT_SPEED = 160;      // units/s — ships cruise at 80, so dodgeable but leadable
-// Halved to hold the range at 400 units. Range is the bolt's role boundary
-// against the railgun's 600; letting it ride up to 800 with the new speed
-// would have made the short-range repeater outrange the sniper.
-const BOLT_LIFE_TICKS = 150;        // 2.5s at 60Hz ⇒ 400 units of range
+// A bolt has to stay meaningfully faster than the ships it's shot at: at 80
+// against a target also doing 80, a crossing target simply cannot be led —
+// there is no firing solution at any angle. At 5x cruise the lead is small
+// enough that the gun plays close to hitscan inside its own range.
+export const BOLT_SPEED = 400;      // units/s — 5x the 80 ships cruise at
+// Range is speed × life, so the speed bump carried it from 400 to 1000 —
+// past the railgun's 600, which used to be the boundary between the two. Drop
+// this to 60 ticks if the repeater should stop outranging the sniper.
+const BOLT_LIFE_TICKS = 150;        // 2.5s at 60Hz ⇒ 1000 units of range
 // Ship bounding sphere padded by the bolt's own body. Derived, not a literal:
 // SHIP_RADIUS is the one knob for how big a target is, and a hardcoded figure
 // here would quietly stop tracking it the first time it moves.
@@ -92,7 +93,7 @@ export const bolt: WeaponDef = {
   },
 
   // Swept hit test along THIS tick's flight segment. It has to be a segment
-  // test, not a point sample: a bolt covers ~1.3 units per tick, more than
+  // test, not a point sample: a bolt covers ~6.7 units per tick, many times
   // its own hit radius, so point sampling would tunnel straight through ships.
   step(shot: Shot, id: string, ctx: StepContext) {
     const age = ctx.tick - shot.spawnTick;

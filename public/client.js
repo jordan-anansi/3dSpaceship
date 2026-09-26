@@ -1702,7 +1702,7 @@ function placeNametag(el, p) {
 // target's motion and the gap between the two ships enter the equation — our
 // own speed changes where we'll BE, not where the bolt goes.
 
-// BOLT_LIFE_TICKS × TICK_DT from src/game/weapons/bolt.ts, i.e. 400 units of
+// BOLT_LIFE_TICKS × TICK_DT from src/game/weapons/bolt.ts, i.e. 1000 units of
 // range. Beyond it the server despawns the bolt in flight, so a pip out there
 // would be marking a hit that can never be resolved — it's hidden instead.
 const BOLT_LIFE_SEC = 2.5;

@@ -16,7 +16,7 @@ import type { StepContext, FireContext, WeaponDef } from './types';
 // for any other weapon: the player judges the fuse off where they can SEE the
 // shell, so a client drawing it at a different speed would be aiming a
 // different gun from the one the server is simulating.
-export const FLAK_SPEED = 110;      // units/s — slower than the bolt's 160; it's placed, not aimed
+export const FLAK_SPEED = 110;      // units/s — slower than the bolt's 400; it's placed, not aimed
 
 // Backstop only. Max fuse (200) at 110 units/s is ~109 ticks, so the fuse
 // always fires first and a shell can never expire as a silent dud. The
